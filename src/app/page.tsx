@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Chart, registerables } from "chart.js";
 Chart.register(...registerables);
+import SIP_RAW from "../data/sip.json";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -17,7 +18,7 @@ interface Holding {
   broker: string;
 }
 
-interface StockHolding { name: string; code: string | null; sector: string; pct: number }
+interface StockHolding { name: string; code: string | null; sector: string; pct: number; nature?: string; fundMarketValueCr?: number }
 
 interface FundDetail {
   name: string; category: string;
@@ -35,6 +36,27 @@ interface Filters { broker: "groww" | "all"; excludeLiquidArb: boolean; excludeR
 const COLORS = ["#5B9DF5","#34D399","#B98CE8","#FB7185","#E8A33D","#4AD8D8","#94A3B8","#F0A868","#7ED6A8","#C084FC"];
 const BIG_HOLDING_THRESHOLD = 5;
 const color = (i: number) => COLORS[i % COLORS.length];
+
+// ─── SIP Calculator constants ─────────────────────────────────────────────────
+
+type CapType = "large" | "mid" | "small";
+type SipCapType = CapType | "flexi" | "gold";
+
+const SIP_RATE_META: Record<CapType, { label: string; min: number; max: number; con: [number,number]; opt: [number,number]; color: string }> = {
+  large: { label: "Large Cap", min: 8,  max: 18, con: [11,12], opt: [12,14], color: "#5B9DF5" },
+  mid:   { label: "Mid Cap",   min: 10, max: 22, con: [13,14], opt: [16,18], color: "#34D399" },
+  small: { label: "Small Cap", min: 10, max: 25, con: [14,15], opt: [17,21], color: "#B98CE8" },
+};
+
+const SIP_FUNDS: { name: string; cap: SipCapType; amount: number }[] = Object.entries(SIP_RAW).map(([name, amount]) => {
+  const n = name.toLowerCase();
+  const cap: SipCapType = n.includes("gold") ? "gold"
+    : n.includes("small") || n.includes("micro") ? "small"
+    : n.includes("mid") ? "mid"
+    : n.includes("large") ? "large"
+    : "flexi";
+  return { name, cap, amount: amount as number };
+});
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -99,6 +121,84 @@ function buildShortLabels(holdings: Holding[]): Record<string, string> {
   return labels;
 }
 
+// ─── SIP helpers ─────────────────────────────────────────────────────────────
+
+function blendedRate(marketCap: { name: string; value: number }[], rates: Record<CapType | "gold", number>): number {
+  let weighted = 0, total = 0;
+  const midpoint = (rates.large + rates.mid + rates.small) / 3;
+  marketCap.forEach(mc => {
+    const n = mc.name.toLowerCase();
+    const r = n.includes("large") ? rates.large : n.includes("mid") ? rates.mid : (n.includes("small") || n.includes("micro")) ? rates.small : midpoint;
+    weighted += mc.value * r; total += mc.value;
+  });
+  return total > 0 ? weighted / total : midpoint;
+}
+
+function fallbackRate(cap: SipCapType, rates: Record<CapType | "gold", number>): number {
+  if (cap === "flexi") return rates.large * 0.5 + rates.mid * 0.35 + rates.small * 0.15;
+  if (cap === "gold") return rates.gold;
+  return rates[cap];
+}
+
+function findHolding(sipName: string, holdings: Holding[]): Holding | undefined {
+  const SKIP = /\b(direct|growth|plan|fund|fof|etf|of|the|and|cap)\b/gi;
+  const words = sipName.toLowerCase().replace(SKIP, "").split(/\s+/).filter(w => w.length > 2);
+  return holdings.find(h => {
+    const hn = h.investment.toLowerCase();
+    return words.filter(w => hn.includes(w)).length >= Math.min(2, words.length);
+  });
+}
+
+function growCorpus(currentValue: number, years: number, annualRate: number): number {
+  return currentValue * Math.pow(1 + annualRate / 100, years);
+}
+
+function sipCorpus(monthly: number, years: number, annualRate: number, stepUpPct: number): number {
+  const r = annualRate / 100 / 12;
+  let corpus = 0, p = monthly;
+  for (let y = 0; y < years; y++) {
+    for (let m = 0; m < 12; m++) corpus = (corpus + p) * (1 + r);
+    p *= (1 + stepUpPct / 100);
+  }
+  return corpus;
+}
+
+function sipInvested(monthly: number, years: number, stepUpPct: number): number {
+  let total = 0, p = monthly;
+  for (let y = 0; y < years; y++) { total += p * 12; p *= (1 + stepUpPct / 100); }
+  return total;
+}
+
+function CapMixBar({ marketCap, monthly }: { marketCap: { name: string; value: number }[]; monthly: number }) {
+  const segs: { key: string; pct: number; color: string; label: string }[] = [];
+  let otherPct = 0;
+  marketCap.forEach(mc => {
+    const n = mc.name.toLowerCase();
+    if (n.includes("large"))                          segs.push({ key: "large", pct: mc.value, color: "#5B9DF5", label: "L" });
+    else if (n.includes("mid"))                       segs.push({ key: "mid",   pct: mc.value, color: "#34D399", label: "M" });
+    else if (n.includes("small") || n.includes("micro")) segs.push({ key: "small", pct: mc.value, color: "#B98CE8", label: "S" });
+    else otherPct += mc.value;
+  });
+  const totalPct = segs.reduce((s, g) => s + g.pct, 0) + otherPct;
+  const scale = totalPct > 0 ? 100 / totalPct : 1;
+  return (
+    <div className="cap-mix-wrap">
+      <div className="cap-mix-bar">
+        {segs.map(g => (
+          <span key={g.key} className="cap-seg" style={{ width: (g.pct * scale) + "%", background: g.color }}
+            title={`${g.key[0].toUpperCase() + g.key.slice(1)} Cap: ${(g.pct * scale).toFixed(0)}% · ${inr(monthly * g.pct * scale / 100)}/mo`} />
+        ))}
+        {otherPct * scale > 1 && (
+          <span className="cap-seg" style={{ width: (otherPct * scale) + "%", background: "#4A5361" }} title={`Other: ${(otherPct * scale).toFixed(0)}%`} />
+        )}
+      </div>
+      <div className="cap-mix-labels">
+        {segs.map(g => <span key={g.key} style={{ color: g.color }}>{g.label} {(g.pct * scale).toFixed(0)}%</span>)}
+      </div>
+    </div>
+  );
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -114,6 +214,8 @@ export default function Dashboard() {
   const [step1Detail, setStep1Detail] = useState("");
   const [step2, setStep2] = useState<"idle"|"loading"|"done"|"error">("idle");
   const [step2Detail, setStep2Detail] = useState("");
+  const [step3, setStep3] = useState<"idle"|"loading"|"done"|"error">("idle");
+  const [step3Detail, setStep3Detail] = useState("");
   const [statusText, setStatusText] = useState("Initializing…");
   const [lastUpdatedTick, setLastUpdatedTick] = useState(0);
   const [statusLive, setStatusLive] = useState(false);
@@ -128,11 +230,17 @@ export default function Dashboard() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   // Derived for table/overlap (state so we can re-render on sort)
   const [tableRows, setTableRows] = useState<ReturnType<typeof buildTableRows>>([]);
-  const [overlapHtml, setOverlapHtml] = useState("");
+  const [sharedHtml, setSharedHtml] = useState("");
+  const [similarityHtml, setSimilarityHtml] = useState("");
+  const [selectedFundCode, setSelectedFundCode] = useState<string | null>(null);
   const [tickerHtml, setTickerHtml] = useState("");
   const [overviewHtml, setOverviewHtml] = useState("");
   const [capCaptionHtml, setCapCaptionHtml] = useState("");
   const [assetCaptionHtml, setAssetCaptionHtml] = useState("");
+  // SIP calculator
+  const [capRates, setCapRates] = useState<Record<CapType | "gold", number>>({ large: 13, mid: 16, small: 18, gold: 9 });
+  const [stepUp, setStepUp] = useState(5);
+  const [sipCustomYears, setSipCustomYears] = useState(10);
 
   // Canvas refs
   const assetCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -141,6 +249,8 @@ export default function Dashboard() {
   const topHoldCanvasRef = useRef<HTMLCanvasElement>(null);
   const stockExpCanvasRef = useRef<HTMLCanvasElement>(null);
   const charts = useRef<Record<string, Chart>>({});
+  const shortToCode = useRef<Record<string, string>>({});
+  const fundHoldingsRef = useRef<HTMLDivElement>(null);
 
   function destroyChart(id: string) {
     charts.current[id]?.destroy();
@@ -234,6 +344,8 @@ export default function Dashboard() {
     setStep1Detail("");
     setStep2("idle");
     setStep2Detail("");
+    setStep3("idle");
+    setStep3Detail("");
     setStatusLive(false);
     setStatusText("Fetching holdings…");
 
@@ -262,10 +374,50 @@ export default function Dashboard() {
       const fdData = await fdRes.json();
       if (fdData.status !== "OK") throw new Error(fdData.message ?? "Fund detail fetch failed");
 
-      setFundMap(fdData.fundMap);
-      setFundMapLoaded(true);
+      // Strip INDmoney stock holdings — Groww is the sole source for stocks
+      const baseFundMap: FundMap = Object.fromEntries(
+        Object.entries(fdData.fundMap as FundMap).map(([id, fd]) => [id, { ...fd, stocks: [] }])
+      );
       setStep2("done");
       setStep2Detail(`${ids.length}/${ids.length}`);
+
+      // Step 3: Groww full holdings — charts only render after this completes
+      setStep3("loading");
+      setStatusText("Fetching complete holdings from Groww…");
+      let mergedFundMap = baseFundMap;
+      try {
+        const funds = holdings.map(h => ({ id: h.investment_code, name: baseFundMap[h.investment_code]?.name ?? h.investment }));
+        const gwRes = await fetch("/api/portfolio/groww-holdings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ funds, force }),
+        });
+        if (gwRes.ok) {
+          const gwData = await gwRes.json() as { status: string; holdings: Record<string, { stocks: { name: string; slug: string; sector: string; pct: number; nature: string; fundMarketValueCr: number }[] }> };
+          if (gwData.status === "OK") {
+            const next = { ...baseFundMap };
+            for (const [id, fd] of Object.entries(gwData.holdings)) {
+              if (next[id]) {
+                next[id] = { ...next[id], stocks: fd.stocks.map(g => ({ name: g.name, code: g.slug, sector: g.sector, pct: g.pct, nature: g.nature, fundMarketValueCr: g.fundMarketValueCr })) };
+              }
+            }
+            mergedFundMap = next;
+            const matched = Object.values(gwData.holdings).filter(fd => fd.stocks.length > 0).length;
+            setStep3("done");
+            setStep3Detail(`${matched}/${funds.length} funds`);
+          } else {
+            setStep3("error");
+          }
+        } else {
+          setStep3("error");
+        }
+      } catch {
+        setStep3("error");
+      }
+
+      // Set fundMap and unlock charts in one go — Groww data already merged
+      setFundMap(mergedFundMap);
+      setFundMapLoaded(true);
 
       const now = new Date();
       setLastUpdated(now);
@@ -274,6 +426,7 @@ export default function Dashboard() {
     } catch (e) {
       setStep1(s => s === "loading" ? "error" : s);
       setStep2(s => s === "loading" ? "error" : s);
+      setStep3(s => s === "loading" ? "error" : s);
       setErrMsg((e instanceof Error ? e.message : String(e)));
       setStatusText("Error");
     }
@@ -377,7 +530,7 @@ export default function Dashboard() {
       const wt = totalCurrent ? h.market_value / totalCurrent : 0;
       const short = shortLabels[h.investment_code];
       if (!fundSectors[short]) { fundSectors[short] = {}; fundOrder.push(short); }
-      fd.stocks.forEach(s => {
+      fd.stocks.filter(s => !s.nature || s.nature === "EQUITY").forEach(s => {
         const pp = s.pct * wt;
         fundSectors[short][s.sector] = (fundSectors[short][s.sector] || 0) + pp;
         sectorTotals[s.sector] = (sectorTotals[s.sector] || 0) + pp;
@@ -425,6 +578,7 @@ export default function Dashboard() {
     filtered.forEach(h => {
       const fd = fundMap[h.investment_code];
       const short = shortLabels[h.investment_code];
+      shortToCode.current[short] = h.investment_code;
       const fundPct = totalCurrent ? h.market_value / totalCurrent * 100 : 0;
       funds.push(short);
       fundPctMap[short] = fundPct;
@@ -460,6 +614,15 @@ export default function Dashboard() {
       data: { labels: uniqueFunds, datasets },
       options: {
         maintainAspectRatio: false,
+        onHover: (_e, els) => { topHoldCanvasRef.current!.style.cursor = els.length ? "pointer" : "default"; },
+        onClick: (_e, els) => {
+          if (!els.length) return;
+          const label = uniqueFunds[els[0].index];
+          const code = shortToCode.current[label];
+          if (!code) return;
+          setSelectedFundCode(c => c === code ? null : code);
+          setTimeout(() => fundHoldingsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+        },
         scales: {
           x: { stacked: true, ticks: { color: "#7C8797", maxRotation: 30, minRotation: 30, font: { size: 10.5 } }, grid: { display: false } },
           y: { stacked: true, ticks: { color: "#7C8797", callback: (v) => v + "%" }, title: { display: true, text: "% of AUM", color: "#7C8797" }, grid: { color: "#1B212B" } },
@@ -496,7 +659,7 @@ export default function Dashboard() {
       const fd = fundMap[h.investment_code];
       if (!fd?.stocks?.length) return;
       const fundWeight = totalCurrent ? h.market_value / totalCurrent : 0;
-      fd.stocks.forEach(s => {
+      fd.stocks.filter(s => !s.nature || s.nature === "EQUITY").forEach(s => {
         const contrib = (s.pct / 100) * fundWeight * 100;
         const contribVal = (s.pct / 100) * h.market_value;
         if (!stockTotals[s.name]) stockTotals[s.name] = { pct: 0, val: 0 };
@@ -587,9 +750,11 @@ export default function Dashboard() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filtered.map(h => h.investment_code + h.pnl_per).join(",")]);
 
-  // Overlap
+  // Shared holdings + Fund similarity
   useEffect(() => {
-    if (!fundMapLoaded || filtered.length < 2) { setOverlapHtml(""); return; }
+    const empty = () => { setSharedHtml(""); setSimilarityHtml(""); };
+    if (!fundMapLoaded || filtered.length < 2) { empty(); return; }
+
     const stockAlloc: Record<string, { display: string; byFund: Record<string, number> }> = {};
     const fundStockFrac: Record<string, Record<string, number>> = {};
     const fundCodes: string[] = [];
@@ -600,7 +765,7 @@ export default function Dashboard() {
       const fc = h.investment_code;
       fundCodes.push(fc);
       fundStockFrac[fc] = fundStockFrac[fc] || {};
-      fd.stocks.forEach(s => {
+      fd.stocks.filter(s => !s.nature || s.nature === "EQUITY").forEach(s => {
         const key = s.code ? `c:${s.code}` : `u:${fc}:${s.name}`;
         fundStockFrac[fc][key] = (fundStockFrac[fc][key] || 0) + s.pct / 100;
         const val = s.pct / 100 * h.market_value;
@@ -615,36 +780,24 @@ export default function Dashboard() {
     const crossPct = totalCurrent ? crossVal / totalCurrent * 100 : 0;
 
     if (uniqueCodes.length < 2 || !crossHeld.length) {
-      setOverlapHtml('<div class="empty">Not enough disclosed data to compute overlap for the current filters</div>');
+      setSharedHtml('<div class="empty">Not enough holdings data for the current filters</div>');
+      setSimilarityHtml("");
       return;
     }
 
+    // ── Shared holdings ──────────────────────────────────────────────────────
     const topCross = crossHeld
       .map(([, v]) => ({ stock: v.display, value: Object.values(v.byFund).reduce((a, b) => a + b, 0) }))
       .sort((a, b) => b.value - a.value).slice(0, 8);
     const maxVal = topCross[0]?.value || 1;
 
-    const pairs: { fa: string; fb: string; ov: number }[] = [];
-    for (let i = 0; i < uniqueCodes.length; i++) {
-      for (let j = i + 1; j < uniqueCodes.length; j++) {
-        const ca = uniqueCodes[i], cb = uniqueCodes[j];
-        const wa = fundStockFrac[ca] || {}, wb = fundStockFrac[cb] || {};
-        const common = Object.keys(wa).filter(s => wb[s] !== undefined);
-        if (!common.length) continue;
-        const ov = common.reduce((s, st) => s + Math.min(wa[st], wb[st]), 0) * 100;
-        if (ov > 0.5) pairs.push({ fa: shortLabels[ca], fb: shortLabels[cb], ov });
-      }
-    }
-    pairs.sort((a, b) => b.ov - a.ov);
-
-    let html = `<div style="margin-bottom:16px">
+    let sharedHtml = `<div style="margin-bottom:16px">
       <div class="metric" style="display:inline-block;min-width:220px">
         <div class="label">Cross-held exposure</div>
         <div class="value">${crossPct.toFixed(1)}%</div>
         <div class="delta">${inr(crossVal)} across stocks held by 2+ funds</div>
       </div></div>`;
-
-    html += topCross.map(o => {
+    sharedHtml += topCross.map(o => {
       const pct = totalCurrent ? (o.value / totalCurrent * 100) : 0;
       return `<div class="overlap-row">
         <div class="overlap-label">${o.stock}</div>
@@ -652,16 +805,50 @@ export default function Dashboard() {
         <div class="overlap-pct">${inr(o.value)} (${pct.toFixed(1)}%)</div>
       </div>`;
     }).join("");
+    setSharedHtml(sharedHtml);
 
-    html += `<div style="margin-top:20px;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Pairwise similarity — disclosed top holdings</div>`;
-    html += pairs.slice(0, 10).map(p => `
+    // ── Fund similarity ───────────────────────────────────────────────────────
+    type PairStock = { name: string; wa: number; wb: number; ov: number };
+    const pairs: { fa: string; fb: string; ov: number; stocks: PairStock[] }[] = [];
+    for (let i = 0; i < uniqueCodes.length; i++) {
+      for (let j = i + 1; j < uniqueCodes.length; j++) {
+        const ca = uniqueCodes[i], cb = uniqueCodes[j];
+        const wa = fundStockFrac[ca] || {}, wb = fundStockFrac[cb] || {};
+        const common = Object.keys(wa).filter(s => wb[s] !== undefined);
+        if (!common.length) continue;
+        const stocks: PairStock[] = common
+          .map(st => ({ name: stockAlloc[st]?.display ?? st, wa: wa[st], wb: wb[st], ov: Math.min(wa[st], wb[st]) }))
+          .sort((a, b) => b.ov - a.ov);
+        const ov = stocks.reduce((s, st) => s + st.ov, 0) * 100;
+        if (ov > 0.5) pairs.push({ fa: shortLabels[ca], fb: shortLabels[cb], ov, stocks });
+      }
+    }
+    pairs.sort((a, b) => b.ov - a.ov);
+
+    setSimilarityHtml(pairs.slice(0, 10).map(p => {
+      const rows = p.stocks.map(s => `
+        <tr>
+          <td>${s.name}</td>
+          <td>${(s.wa * 100).toFixed(2)}%</td>
+          <td>${(s.wb * 100).toFixed(2)}%</td>
+          <td class="ov-val">${(s.ov * 100).toFixed(2)}%</td>
+        </tr>`).join("");
+      return `
       <div class="overlap-row">
         <div class="overlap-label">${p.fa} × ${p.fb}</div>
         <div class="overlap-bar-bg"><div class="overlap-bar-fg" style="width:${Math.min(p.ov, 100).toFixed(1)}%"></div></div>
         <div class="overlap-pct">${p.ov.toFixed(1)}%</div>
-      </div>`).join("");
-
-    setOverlapHtml(html);
+        <details>
+          <summary>${p.stocks.length} common stocks</summary>
+          <div class="overlap-breakdown">
+            <table>
+              <thead><tr><th>Stock</th><th>${p.fa}</th><th>${p.fb}</th><th>Overlap</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </details>
+      </div>`;
+    }).join(""));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fundMapLoaded, filtered.map(h => h.investment_code).join(","), fundMap]);
 
@@ -769,7 +956,7 @@ export default function Dashboard() {
               <span id="statusText" style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--mono)" }}>{statusText}</span>
             </span>
             <button className="refresh" onClick={() => loadData(true)} disabled={step1 === "loading" || step2 === "loading"}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className={step1 === "loading" || step2 === "loading" ? "spin" : ""}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className={step1 === "loading" || step2 === "loading" || step3 === "loading" ? "spin" : ""}>
                 <path d="M21 2v6h-6" /><path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
                 <path d="M3 22v-6h6" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
               </svg>
@@ -786,6 +973,10 @@ export default function Dashboard() {
           <div className="step-arrow">→</div>
           <div className={`step${step2 !== "idle" ? " " + step2 : ""}`}>
             <span className="step-dot" />2. Fund details{step2Detail ? ` · ${step2Detail}` : ""}
+          </div>
+          <div className="step-arrow">→</div>
+          <div className={`step${step3 !== "idle" ? " " + step3 : ""}`}>
+            <span className="step-dot" />3. Full holdings{step3Detail ? ` · ${step3Detail}` : ""}
           </div>
         </div>
 
@@ -913,7 +1104,7 @@ export default function Dashboard() {
           </div>
           {fundMapLoaded && (
             <div className="chart-note">
-              Each bar = stock&apos;s total <b>% of your portfolio</b> summed across all funds that hold it, weighted by fund allocation. Top 18 stocks shown. Based on disclosed top holdings only.
+              Each bar = stock&apos;s total <b>% of your portfolio</b> summed across all funds that hold it, weighted by fund allocation. Top 18 stocks shown. Full portfolio data via Groww.
             </div>
           )}
         </div>
@@ -927,20 +1118,234 @@ export default function Dashboard() {
           </div>
           {fundMapLoaded && (
             <div className="chart-note">
-              Bar height = fund&apos;s <b>% of total AUM</b>. A stock gets its own color only if ≥<b>{BIG_HOLDING_THRESHOLD}%</b> of that fund. Hover a segment for fund % and AUM %. Smaller positions merged into &quot;Others&quot;.
+              Bar height = fund&apos;s <b>% of total AUM</b>. A stock gets its own color only if ≥<b>{BIG_HOLDING_THRESHOLD}%</b> of that fund. <b>Click a bar</b> to see all holdings below. Hover for details.
             </div>
           )}
         </div>
 
-        {/* Overlap */}
+        {/* Fund holdings explorer */}
+        {fundMapLoaded && filtered.some(h => fundMap[h.investment_code]?.stocks?.length) && (
+          <div className="card" ref={fundHoldingsRef}>
+            <h2>Fund holdings</h2>
+            <div className="fh-pills">
+              {filtered.filter(h => fundMap[h.investment_code]?.stocks?.length).map(h => (
+                <button
+                  key={h.investment_code}
+                  className={`fh-pill${selectedFundCode === h.investment_code ? " active" : ""}`}
+                  onClick={() => setSelectedFundCode(c => c === h.investment_code ? null : h.investment_code)}
+                >
+                  {shortLabels[h.investment_code]}
+                </button>
+              ))}
+            </div>
+            {selectedFundCode && fundMap[selectedFundCode] && (() => {
+              const fd = fundMap[selectedFundCode];
+              const holding = filtered.find(h => h.investment_code === selectedFundCode);
+              const mv = holding?.market_value ?? 0;
+              const stocks = [...fd.stocks].sort((a, b) => b.pct - a.pct);
+              return (
+                <div className="fh-table-wrap">
+                  <table className="fh-table">
+                    <thead>
+                      <tr>
+                        <th className="fh-th-num">#</th>
+                        <th>Stock</th>
+                        <th>Sector</th>
+                        <th className="fh-th-r">% of fund</th>
+                        <th className="fh-th-r">Est. value</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {stocks.map((s, i) => {
+                        const isEquity = !s.nature || s.nature === "EQUITY";
+                        return (
+                          <tr key={i} className={isEquity ? "" : "fh-tr-nonequity"}>
+                            <td className="fh-td-num">{i + 1}</td>
+                            <td className="fh-td-name">
+                              {s.name}
+                              {!isEquity && <span className="fh-nature-badge">{s.nature}</span>}
+                            </td>
+                            <td className="fh-td-sector">{s.sector || "—"}</td>
+                            <td className="fh-td-r">{s.pct.toFixed(2)}%</td>
+                            <td className="fh-td-r fh-val">{inr(s.pct / 100 * mv)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* Shared holdings */}
         <div className="card">
-          <h2>Fund overlap</h2>
-          {overlapHtml ? (
-            <div dangerouslySetInnerHTML={{ __html: overlapHtml }} />
+          <h2>Shared holdings</h2>
+          {sharedHtml ? (
+            <div dangerouslySetInnerHTML={{ __html: sharedHtml }} />
           ) : (
             <><div className="skeleton sk-line" /><div className="skeleton sk-line" /></>
           )}
         </div>
+
+        {/* Fund similarity */}
+        <div className="card">
+          <h2>Fund similarity</h2>
+          {similarityHtml ? (
+            <div dangerouslySetInnerHTML={{ __html: similarityHtml }} />
+          ) : (
+            <><div className="skeleton sk-line" /><div className="skeleton sk-line" /></>
+          )}
+        </div>
+
+        {/* SIP Projection Calculator */}
+        {(() => {
+          const FIXED_YEARS = [5, 10, 15, 20, 30];
+          const sipMeta = SIP_FUNDS.map(sip => {
+            const holding = findHolding(sip.name, allHoldings);
+            const fd = fundMapLoaded && holding ? fundMap[holding.investment_code] : null;
+            const rate = fd && fd.marketCap.length > 0 ? blendedRate(fd.marketCap, capRates) : fallbackRate(sip.cap, capRates);
+            return { rate, existingValue: holding?.market_value ?? 0, fd };
+          });
+          const totalMonthly = SIP_FUNDS.reduce((s, f) => s + f.amount, 0);
+          const totalExisting = sipMeta.reduce((s, m) => s + m.existingValue, 0);
+          const totalInvestedCust = SIP_FUNDS.reduce((s, f) => s + sipInvested(f.amount, sipCustomYears, stepUp), 0);
+          const totalCorpusCust = SIP_FUNDS.reduce((s, f, i) => s + growCorpus(sipMeta[i].existingValue, sipCustomYears, sipMeta[i].rate) + sipCorpus(f.amount, sipCustomYears, sipMeta[i].rate, stepUp), 0);
+          return (
+            <div className="card sip-calc">
+              <div className="sip-header">
+                <h2>SIP Projection</h2>
+                <div className="sip-header-meta">
+                  <span className="sip-total-lbl">Total monthly</span>
+                  <span className="sip-total-val">{inrFull(totalMonthly)}</span>
+                </div>
+              </div>
+
+              {/* Per-cap return rate tuners */}
+              <div className="sip-rates-grid">
+                {([...Object.keys(SIP_RATE_META), "gold"] as (CapType | "gold")[]).map(cap => {
+                  if (cap === "gold") {
+                    return (
+                      <div key="gold" className="sip-rate-card">
+                        <div className="sip-rate-top">
+                          <span className="sip-rate-name">Gold</span>
+                          <span className="sip-rate-cur" style={{ color: "#E8A33D" }}>{capRates.gold?.toFixed(1) ?? "9.0"}%</span>
+                        </div>
+                        <input type="range" min={5} max={14} step={0.5} value={capRates.gold ?? 9}
+                          onChange={e => setCapRates(prev => ({ ...prev, gold: +e.target.value }))}
+                          className="sip-slider" />
+                        <div className="sip-rate-refs">
+                          <span className="sip-rate-con">Con 8.5%</span>
+                          <span className="sip-rate-opt">Opt 9.5%</span>
+                        </div>
+                      </div>
+                    );
+                  }
+                  const meta = SIP_RATE_META[cap as CapType];
+                  return (
+                    <div key={cap} className="sip-rate-card">
+                      <div className="sip-rate-top">
+                        <span className="sip-rate-name">{meta.label}</span>
+                        <span className="sip-rate-cur" style={{ color: meta.color }}>{capRates[cap as CapType].toFixed(1)}%</span>
+                      </div>
+                      <input type="range" min={meta.min} max={meta.max} step={0.5} value={capRates[cap as CapType]}
+                        onChange={e => setCapRates(prev => ({ ...prev, [cap]: +e.target.value }))}
+                        className="sip-slider" />
+                      <div className="sip-rate-refs">
+                        <span className="sip-rate-con">Con {meta.con[0]}–{meta.con[1]}%</span>
+                        <span className="sip-rate-opt">Opt {meta.opt[0]}–{meta.opt[1]}%</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Step-up + custom horizon knobs */}
+              <div className="sip-knobs">
+                <div className="sip-knob">
+                  <span className="sip-knob-label">Annual step-up</span>
+                  <div className="sip-knob-row">
+                    <input type="range" min={0} max={25} step={1} value={stepUp}
+                      onChange={e => setStepUp(+e.target.value)} className="sip-slider" />
+                    <span className="sip-knob-val">{stepUp}%</span>
+                  </div>
+                </div>
+                <div className="sip-knob">
+                  <span className="sip-knob-label">Custom horizon ✦</span>
+                  <div className="sip-knob-row">
+                    <input type="range" min={1} max={40} step={1} value={sipCustomYears}
+                      onChange={e => setSipCustomYears(+e.target.value)} className="sip-slider" />
+                    <span className="sip-knob-val">{sipCustomYears}Y</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Projection table */}
+              <div className="sip-table-wrap">
+                <table className="sip-table">
+                  <thead>
+                    <tr>
+                      <th className="sip-th-fund">Fund</th>
+                      <th className="sip-th-amt">Monthly</th>
+                      <th className="sip-th-amt">Current</th>
+                      <th className="sip-th-mix">Cap mix</th>
+                      {FIXED_YEARS.map(y => <th key={y} className="sip-th-yr">{y}Y</th>)}
+                      <th className="sip-th-yr sip-th-cust">{sipCustomYears}Y ✦</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {SIP_FUNDS.map((sip, i) => {
+                      const { rate, existingValue, fd } = sipMeta[i];
+                      const capLabel = sip.cap === "flexi" ? "Flexi Cap" : sip.cap === "gold" ? "Gold" : SIP_RATE_META[sip.cap].label;
+                      const totalAtYear = (y: number) => growCorpus(existingValue, y, rate) + sipCorpus(sip.amount, y, rate, stepUp);
+                      return (
+                        <tr key={sip.name} className="sip-tr">
+                          <td className="sip-td-fund">{sip.name}</td>
+                          <td className="sip-td-amt">{inrFull(sip.amount)}</td>
+                          <td className="sip-td-amt">{existingValue > 0 ? inr(existingValue) : <span style={{ color: "var(--faint)" }}>—</span>}</td>
+                          <td className="sip-td-mix">
+                            {fd && fd.marketCap.length > 0
+                              ? <CapMixBar marketCap={fd.marketCap} monthly={sip.amount} />
+                              : <span className="sip-cap-fb">{capLabel}{sip.cap === "flexi" ? " (est.)" : ""}</span>}
+                            <span className="sip-blend">~{rate.toFixed(1)}%</span>
+                          </td>
+                          {FIXED_YEARS.map(y => (
+                            <td key={y} className="sip-td-corpus">{inr(totalAtYear(y))}</td>
+                          ))}
+                          <td className="sip-td-corpus sip-td-cust">{inr(totalAtYear(sipCustomYears))}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr className="sip-tr-tot">
+                      <td className="sip-td-fund">Total</td>
+                      <td className="sip-td-amt">{inrFull(totalMonthly)}</td>
+                      <td className="sip-td-amt">{inr(totalExisting)}</td>
+                      <td className="sip-td-mix" />
+                      {FIXED_YEARS.map(y => (
+                        <td key={y} className="sip-td-corpus">
+                          {inr(SIP_FUNDS.reduce((s, f, i) => s + growCorpus(sipMeta[i].existingValue, y, sipMeta[i].rate) + sipCorpus(f.amount, y, sipMeta[i].rate, stepUp), 0))}
+                        </td>
+                      ))}
+                      <td className="sip-td-corpus sip-td-cust">{inr(totalCorpusCust)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+
+              {/* Summary line */}
+              <div className="sip-summary">
+                At <b>{sipCustomYears}Y</b> with <b>{stepUp}% step-up</b> &mdash;{" "}
+                existing <b>{inr(totalExisting)}</b> + fresh SIPs <b>{inr(totalInvestedCust)}</b>{" "}
+                = total in <b>{inr(totalExisting + totalInvestedCust)}</b> &nbsp;→&nbsp;
+                corpus <b style={{ color: "var(--pos)" }}>{inr(totalCorpusCust)}</b>
+                <span className="sip-gain-x">&nbsp;({(totalCorpusCust / (totalExisting + totalInvestedCust)).toFixed(1)}×)</span>
+              </div>
+            </div>
+          );
+        })()}
 
       </div>
 
@@ -967,7 +1372,7 @@ export default function Dashboard() {
               </div>
             )}
             <ul className="footer-disclaimers">
-              <li>Sector, overlap &amp; top-holdings figures derive from each fund&apos;s disclosed top equity holdings — not the full portfolio.</li>
+              <li>Sector, overlap &amp; stock-exposure figures use full portfolio data (67 holdings, 100% AUM) sourced from Groww.</li>
               <li>Overlap is matched by internal instrument code, not fund name.</li>
               <li>Filters recompute instantly — press Refresh for fresh NAV data.</li>
             </ul>

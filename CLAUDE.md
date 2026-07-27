@@ -2,10 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Companion docs
+## Companion 
+
+Update below docs on any architecture change if applicable.
 
 - [`auth.md`](./auth.md) — OAuth sign-in flow, token failure cases, encrypted cookie storage, cache strategy
+    @auth.md    
 - [`charts.md`](./charts.md) — what MCP data is fetched, and per-chart data source breakdown
+    @charts.md
 
 **Keep these up to date.** When making changes to auth flow, token storage, caching, or any chart/data-fetch logic, update the relevant doc if the change is meaningful enough to affect how a reader would understand the system.
 
@@ -67,6 +71,28 @@ Single "use client" component. State-driven with Chart.js managed via `useRef<Re
 - Overview cards, ticker, overlap, and table rows are HTML strings set via `dangerouslySetInnerHTML` (avoids chart re-renders on sort/filter).
 - `sortedRows` sort happens in render from `tableRows` state; `toggleSort` just flips `sortKey`/`sortDir` state.
 - Status text uses a relative "ago" format (just now / N min ago / N hr ago), updated every 30s via `setInterval`.
+
+### SIP Projection Calculator (`src/app/page.tsx` + `src/data/sip.json`)
+
+Pure client-side calculator rendered at the bottom of the dashboard. No API calls — all computation is in-browser.
+
+**Data source (`src/data/sip.json`)**: Simple `{ "Fund Name": amount }` key-value map of ongoing SIPs. Cap type (large/mid/small/flexi/gold) is inferred from the fund name at module load.
+
+**Rate model**:
+- `CapType = "large" | "mid" | "small"` — the three tunable rate knobs shown in the UI.
+- `SipCapType = CapType | "flexi" | "gold"` — fund classification; flexi and gold have no separate UI knob.
+- `blendedRate(marketCap, rates)` — for equity funds, applies large/mid/small rates weighted by the fund's actual stock-level market-cap breakdown (from `fundMap`). This means moving the Large Cap slider affects Parag Parikh's rate proportionally to its large-cap stock weight.
+- `fallbackRate(cap, rates)` — used before `fundMap` loads: flexi falls back to `0.5×large + 0.35×mid + 0.15×small`; gold uses the gold rate directly.
+- Gold ETFs never go through `blendedRate` — their `marketCap` array contains no equity segments.
+
+**Holding match (`findHolding`)**: Strips noise words (`direct`, `etf`, `fof`, `fund`, `cap`, etc.), then matches a SIP entry to `allHoldings` if ≥2 meaningful words appear in the holding name. Handles abbreviations like "Pru" vs "Prudential" — as long as ≥2 other words match.
+
+**Corpus formula**:
+- `sipCorpus(monthly, years, rate, stepUp)` — iterative step-up SIP: each year's monthly amount is `P × (1+stepUp/100)^year`, compounded monthly.
+- `growCorpus(currentValue, years, rate)` — simple annual compounding of the existing holding market value.
+- Total at year N = `growCorpus(existingValue, N, rate) + sipCorpus(monthly, N, rate, stepUp)`.
+
+**UI knobs**: Large / Mid / Small / Gold rate sliders (with historical con/opt reference bands), annual step-up slider (0–25%), custom horizon slider (1–40Y). Fixed columns: 5, 10, 15, 20, 30Y. Custom year highlighted in amber (✦).
 
 ### Favicon (`src/app/icon.svg`)
 
