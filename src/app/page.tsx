@@ -48,14 +48,14 @@ const SIP_RATE_META: Record<CapType, { label: string; min: number; max: number; 
   small: { label: "Small Cap", min: 10, max: 25, con: [14,15], opt: [17,21], color: "#B98CE8" },
 };
 
-const SIP_FUNDS: { name: string; cap: SipCapType; amount: number }[] = Object.entries(SIP_RAW).map(([name, amount]) => {
+const SIP_FUNDS: { name: string; id: string; cap: SipCapType; amount: number }[] = (SIP_RAW as { name: string; id: string; amount: number }[]).map(({ name, id, amount }) => {
   const n = name.toLowerCase();
   const cap: SipCapType = n.includes("gold") ? "gold"
     : n.includes("small") || n.includes("micro") ? "small"
     : n.includes("mid") ? "mid"
     : n.includes("large") ? "large"
     : "flexi";
-  return { name, cap, amount: amount as number };
+  return { name, id, cap, amount };
 });
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -237,6 +237,7 @@ export default function Dashboard() {
   const [overviewHtml, setOverviewHtml] = useState("");
   const [capCaptionHtml, setCapCaptionHtml] = useState("");
   const [assetCaptionHtml, setAssetCaptionHtml] = useState("");
+  const [fhView, setFhView] = useState<"stocks" | "assets">("stocks");
   // SIP calculator
   const [capRates, setCapRates] = useState<Record<CapType | "gold", number>>({ large: 13, mid: 16, small: 18, gold: 9 });
   const [stepUp, setStepUp] = useState(5);
@@ -1064,66 +1065,43 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody>
-                {sortedRows.map(r => (
-                  <tr key={r.code}>
-                    <td className="fund-name" title={r.name}>{r.name}</td>
-                    <td><span className="tag">{r.cat}</span></td>
-                    <td style={{ color: "var(--muted)", fontSize: 12 }}>{r.broker}</td>
-                    <td className={`num ${r.r1y === null ? "" : r.r1y >= 0 ? "pos" : "neg"}`}>
-                      {r.r1y === null ? "—" : `${r.r1y >= 0 ? "+" : ""}${r.r1y.toFixed(2)}%`}
-                    </td>
-                    <td className={`num ${r.r3y === null ? "" : r.r3y >= 0 ? "pos" : "neg"}`}>
-                      {r.r3y === null ? "—" : `${r.r3y >= 0 ? "+" : ""}${r.r3y.toFixed(2)}%`}
-                    </td>
-                    <td className="num">{inrFull(r.invested)}</td>
-                    <td className="num">{inrFull(r.current)}</td>
-                    <td className={`num ${r.pnl >= 0 ? "pos" : "neg"}`}>{r.pnl >= 0 ? "+" : ""}{r.pnl.toFixed(2)}%</td>
-                    <td className="num">{r.weight.toFixed(1)}%</td>
-                  </tr>
-                ))}
+                {sortedRows.map(r => {
+                  const hasHoldings = !!fundMap[r.code]?.stocks?.length;
+                  return (
+                    <tr key={r.code} className={selectedFundCode === r.code ? "row-selected" : ""}>
+                      <td
+                        className={`fund-name${hasHoldings ? " fund-name-link" : ""}`}
+                        title={r.name}
+                        onClick={() => {
+                          if (!hasHoldings) return;
+                          setSelectedFundCode(c => c === r.code ? null : r.code);
+                          setTimeout(() => fundHoldingsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+                        }}
+                      >
+                        {r.name}
+                        {hasHoldings && <span className="fn-chevron">{selectedFundCode === r.code ? "▲" : "▼"}</span>}
+                      </td>
+                      <td><span className="tag">{r.cat}</span></td>
+                      <td style={{ color: "var(--muted)", fontSize: 12 }}>{r.broker}</td>
+                      <td className={`num ${r.r1y === null ? "" : r.r1y >= 0 ? "pos" : "neg"}`}>
+                        {r.r1y === null ? "—" : `${r.r1y >= 0 ? "+" : ""}${r.r1y.toFixed(2)}%`}
+                      </td>
+                      <td className={`num ${r.r3y === null ? "" : r.r3y >= 0 ? "pos" : "neg"}`}>
+                        {r.r3y === null ? "—" : `${r.r3y >= 0 ? "+" : ""}${r.r3y.toFixed(2)}%`}
+                      </td>
+                      <td className="num">{inrFull(r.invested)}</td>
+                      <td className="num">{inrFull(r.current)}</td>
+                      <td className={`num ${r.pnl >= 0 ? "pos" : "neg"}`}>{r.pnl >= 0 ? "+" : ""}{r.pnl.toFixed(2)}%</td>
+                      <td className="num">{r.weight.toFixed(1)}%</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}
         </div>
 
-        {/* Sector chart */}
-        <div className="card">
-          <h2>Sector exposure — portfolio-weighted</h2>
-          <div className="chart-box-tall">
-            {!fundMapLoaded && <div className="skeleton" style={{ position: "absolute", inset: 0, borderRadius: 6 }} />}
-            <canvas ref={sectorCanvasRef} />
-          </div>
-        </div>
-
-        {/* Stock exposure chart */}
-        <div className="card">
-          <h2>Stock exposure — consolidated across funds</h2>
-          <div className="chart-box-stock">
-            {!fundMapLoaded && <div className="skeleton" style={{ position: "absolute", inset: 0, borderRadius: 6 }} />}
-            <canvas ref={stockExpCanvasRef} />
-          </div>
-          {fundMapLoaded && (
-            <div className="chart-note">
-              Each bar = stock&apos;s total <b>% of your portfolio</b> summed across all funds that hold it, weighted by fund allocation. Top 18 stocks shown. Full portfolio data via Groww.
-            </div>
-          )}
-        </div>
-
-        {/* Top holdings chart */}
-        <div className="card">
-          <h2>Top holdings per fund</h2>
-          <div className="chart-box-tall">
-            {!fundMapLoaded && <div className="skeleton" style={{ position: "absolute", inset: 0, borderRadius: 6 }} />}
-            <canvas ref={topHoldCanvasRef} />
-          </div>
-          {fundMapLoaded && (
-            <div className="chart-note">
-              Bar height = fund&apos;s <b>% of total AUM</b>. A stock gets its own color only if ≥<b>{BIG_HOLDING_THRESHOLD}%</b> of that fund. <b>Click a bar</b> to see all holdings below. Hover for details.
-            </div>
-          )}
-        </div>
-
-        {/* Fund holdings explorer */}
+        {/* Fund holdings explorer — below the funds table */}
         {fundMapLoaded && filtered.some(h => fundMap[h.investment_code]?.stocks?.length) && (
           <div className="card" ref={fundHoldingsRef}>
             <h2>Fund holdings</h2>
@@ -1138,10 +1116,65 @@ export default function Dashboard() {
                 </button>
               ))}
             </div>
+            {selectedFundCode && (
+              <div className="seg fh-view-seg">
+                <button className={fhView === "stocks" ? "active" : ""} onClick={() => setFhView("stocks")}>Stocks</button>
+                <button className={fhView === "assets" ? "active" : ""} onClick={() => setFhView("assets")}>Asset split</button>
+              </div>
+            )}
             {selectedFundCode && fundMap[selectedFundCode] && (() => {
               const fd = fundMap[selectedFundCode];
               const holding = filtered.find(h => h.investment_code === selectedFundCode);
               const mv = holding?.market_value ?? 0;
+
+              if (fhView === "assets") {
+                const total = fd.marketCap.reduce((s, r) => s + r.value, 0) || 100;
+                const isCapRow = (n: string) => { const l = n.toLowerCase(); return l.includes("large") || l.includes("mid") || l.includes("small") || l.includes("micro"); };
+                const capRows  = fd.marketCap.filter(r => isCapRow(r.name)).sort((a, b) => b.value - a.value);
+                const otherRows = fd.marketCap.filter(r => !isCapRow(r.name)).sort((a, b) => b.value - a.value);
+                const equityTotal = capRows.reduce((s, r) => s + r.value, 0);
+                const subCapColor = (n: string) => n.toLowerCase().includes("large") ? "#5B9DF5" : n.toLowerCase().includes("mid") ? "#34D399" : "#B98CE8";
+                return (
+                  <div className="fh-table-wrap">
+                    <table className="fh-table">
+                      <thead>
+                        <tr>
+                          <th>Asset class</th>
+                          <th className="fh-th-r">% of fund</th>
+                          <th className="fh-th-r">Est. value</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {capRows.length > 0 && (
+                          <>
+                            <tr className="fh-asset-parent">
+                              <td className="fh-td-name" style={{ color: "#5B9DF5", fontWeight: 600 }}>Equity</td>
+                              <td className="fh-td-r">{(equityTotal / total * 100).toFixed(1)}%</td>
+                              <td className="fh-td-r fh-val">{inr(equityTotal / total * mv)}</td>
+                            </tr>
+                            {capRows.map(sub => (
+                              <tr key={sub.name} className="fh-asset-sub">
+                                <td className="fh-td-name fh-sub-indent" style={{ color: subCapColor(sub.name) }}>↳ {sub.name}</td>
+                                <td className="fh-td-r">{(sub.value / total * 100).toFixed(1)}%</td>
+                                <td className="fh-td-r fh-val">{inr(sub.value / total * mv)}</td>
+                              </tr>
+                            ))}
+                          </>
+                        )}
+                        {otherRows.map((row, i) => (
+                          <tr key={row.name} className="fh-asset-parent">
+                            <td className="fh-td-name" style={{ color: COLORS[i + 3], fontWeight: 600 }}>{row.name}</td>
+                            <td className="fh-td-r">{(row.value / total * 100).toFixed(1)}%</td>
+                            <td className="fh-td-r fh-val">{inr(row.value / total * mv)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              }
+
+              // Default: stocks view
               const stocks = [...fd.stocks].sort((a, b) => b.pct - a.pct);
               return (
                 <div className="fh-table-wrap">
@@ -1179,6 +1212,44 @@ export default function Dashboard() {
           </div>
         )}
 
+        {/* Sector chart */}
+        <div className="card">
+          <h2>Sector exposure — portfolio-weighted</h2>
+          <div className="chart-box-tall">
+            {!fundMapLoaded && <div className="skeleton" style={{ position: "absolute", inset: 0, borderRadius: 6 }} />}
+            <canvas ref={sectorCanvasRef} />
+          </div>
+        </div>
+
+        {/* Stock exposure chart */}
+        <div className="card">
+          <h2>Stock exposure — consolidated across funds</h2>
+          <div className="chart-box-stock">
+            {!fundMapLoaded && <div className="skeleton" style={{ position: "absolute", inset: 0, borderRadius: 6 }} />}
+            <canvas ref={stockExpCanvasRef} />
+          </div>
+          {fundMapLoaded && (
+            <div className="chart-note">
+              Each bar = stock&apos;s total <b>% of your portfolio</b> summed across all funds that hold it, weighted by fund allocation. Top 18 stocks shown. Full portfolio data via Groww.
+            </div>
+          )}
+        </div>
+
+        {/* Top holdings chart */}
+        <div className="card">
+          <h2>Top holdings per fund</h2>
+          <div className="chart-box-tall">
+            {!fundMapLoaded && <div className="skeleton" style={{ position: "absolute", inset: 0, borderRadius: 6 }} />}
+            <canvas ref={topHoldCanvasRef} />
+          </div>
+          {fundMapLoaded && (
+            <div className="chart-note">
+              Bar height = fund&apos;s <b>% of total AUM</b>. A stock gets its own color only if ≥<b>{BIG_HOLDING_THRESHOLD}%</b> of that fund. <b>Click a bar or fund name</b> in the table above to drill into holdings.
+            </div>
+          )}
+        </div>
+
+
         {/* Shared holdings */}
         <div className="card">
           <h2>Shared holdings</h2>
@@ -1203,8 +1274,8 @@ export default function Dashboard() {
         {(() => {
           const FIXED_YEARS = [5, 10, 15, 20, 30];
           const sipMeta = SIP_FUNDS.map(sip => {
-            const holding = findHolding(sip.name, allHoldings);
-            const fd = fundMapLoaded && holding ? fundMap[holding.investment_code] : null;
+            const holding = allHoldings.find(h => h.investment_code === sip.id);
+            const fd = fundMapLoaded ? fundMap[sip.id] ?? null : null;
             const rate = fd && fd.marketCap.length > 0 ? blendedRate(fd.marketCap, capRates) : fallbackRate(sip.cap, capRates);
             return { rate, existingValue: holding?.market_value ?? 0, fd };
           });

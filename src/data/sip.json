@@ -1,8 +1,8 @@
-{
-  "HDFC Mid Cap Direct":            25000,
-  "Nippon India Large Cap Direct":  22500,
-  "Parag Parikh Flexi Cap Direct":  20000,
-  "Invesco India Smallcap Direct":  12500,
-  "Bandhan Small Cap Direct":       12500,
-  "ICICI Pru Gold ETF FoF Direct":   7500
-}
+[
+  { "name": "HDFC Mid Cap Direct",            "id": "3097",    "amount": 25000 },
+  { "name": "Nippon India Large Cap Direct",  "id": "3040",    "amount": 22500 },
+  { "name": "Parag Parikh Flexi Cap Direct",  "id": "3229",    "amount": 20000 },
+  { "name": "Invesco India Smallcap Direct",  "id": "1002070", "amount": 12500 },
+  { "name": "Bandhan Small Cap Direct",       "id": "1005544", "amount": 12500 },
+  { "name": "ICICI Pru Gold ETF FoF Direct",  "id": "5382",    "amount":  7500 }
+]

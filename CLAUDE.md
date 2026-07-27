@@ -76,16 +76,16 @@ Single "use client" component. State-driven with Chart.js managed via `useRef<Re
 
 Pure client-side calculator rendered at the bottom of the dashboard. No API calls — all computation is in-browser.
 
-**Data source (`src/data/sip.json`)**: Simple `{ "Fund Name": amount }` key-value map of ongoing SIPs. Cap type (large/mid/small/flexi/gold) is inferred from the fund name at module load.
+**Data source (`src/data/sip.json`)**: Array of `{ name, id, amount }` objects. `id` is the INDmoney `investment_code` (same key used in `networth_holdings` and `fundMap`). Cap type (large/mid/small/flexi/gold) is inferred from the fund name at module load. When adding a new SIP, look up the `investment_code` from `networth_holdings`.
 
 **Rate model**:
 - `CapType = "large" | "mid" | "small"` — the three tunable rate knobs shown in the UI.
 - `SipCapType = CapType | "flexi" | "gold"` — fund classification; flexi and gold have no separate UI knob.
-- `blendedRate(marketCap, rates)` — for equity funds, applies large/mid/small rates weighted by the fund's actual stock-level market-cap breakdown (from `fundMap`). This means moving the Large Cap slider affects Parag Parikh's rate proportionally to its large-cap stock weight.
+- `blendedRate(marketCap, rates)` — for equity funds, applies large/mid/small rates weighted by the fund's actual market-cap breakdown (from `fundMap[sip.id]`). This means moving the Large Cap slider affects Parag Parikh's rate proportionally to its large-cap weight.
 - `fallbackRate(cap, rates)` — used before `fundMap` loads: flexi falls back to `0.5×large + 0.35×mid + 0.15×small`; gold uses the gold rate directly.
 - Gold ETFs never go through `blendedRate` — their `marketCap` array contains no equity segments.
 
-**Holding match (`findHolding`)**: Strips noise words (`direct`, `etf`, `fof`, `fund`, `cap`, etc.), then matches a SIP entry to `allHoldings` if ≥2 meaningful words appear in the holding name. Handles abbreviations like "Pru" vs "Prudential" — as long as ≥2 other words match.
+**Holding lookup**: `sipMeta` resolves each SIP by `sip.id` directly — `allHoldings.find(h => h.investment_code === sip.id)` for current value, `fundMap[sip.id]` for market-cap data. No fuzzy name matching needed.
 
 **Corpus formula**:
 - `sipCorpus(monthly, years, rate, stepUp)` — iterative step-up SIP: each year's monthly amount is `P × (1+stepUp/100)^year`, compounded monthly.
