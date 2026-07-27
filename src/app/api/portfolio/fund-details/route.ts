@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callTool, AuthRequiredError } from "../../../../lib/mcp-client";
 import { getCached, setCached, bustCache } from "../../../../lib/cache";
+import { TokenStore, TOKEN_COOKIE } from "../../../../lib/token-store";
 
 interface StockHolding { name: string; code: string | null; sector: string; pct: number }
 interface FundDetail {
@@ -67,8 +68,8 @@ function chunk<T>(arr: T[], n: number): T[][] {
 }
 
 export async function POST(req: NextRequest) {
-  const sessionId = req.cookies.get("mcp_session")?.value;
-  if (!sessionId) return NextResponse.json({ status: "AUTH_REQUIRED" }, { status: 401 });
+  const store = await TokenStore.fromCookie(req.cookies.get(TOKEN_COOKIE)?.value);
+  if (!store.get().accessToken) return NextResponse.json({ status: "AUTH_REQUIRED" }, { status: 401 });
 
   const { ids, force } = (await req.json()) as { ids: string[]; force?: boolean };
   const chunks = chunk(ids, 10);
@@ -84,7 +85,7 @@ export async function POST(req: NextRequest) {
           bustCache(cacheKey);
         }
 
-        const raw = await callTool(sessionId, "get_mf_funds_details", {
+        const raw = await callTool(store, "get_mf_funds_details", {
           fund_ids: batch.join(","),
           includes: ["holdings", "asset_allocation"],
         });
@@ -95,7 +96,12 @@ export async function POST(req: NextRequest) {
     );
 
     const fundMap = Object.assign({}, ...partials);
-    return NextResponse.json({ status: "OK", fundMap });
+    const res = NextResponse.json({ status: "OK", fundMap });
+    if (store.isDirty) {
+      const { value, options } = await store.toCookieOptions();
+      res.cookies.set(TOKEN_COOKIE, value, options as Parameters<typeof res.cookies.set>[2]);
+    }
+    return res;
   } catch (err) {
     if (err instanceof AuthRequiredError) return NextResponse.json({ status: "AUTH_REQUIRED" }, { status: 401 });
     return NextResponse.json({ status: "ERROR", message: String(err) }, { status: 500 });

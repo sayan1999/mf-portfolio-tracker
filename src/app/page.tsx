@@ -115,6 +115,7 @@ export default function Dashboard() {
   const [step2, setStep2] = useState<"idle"|"loading"|"done"|"error">("idle");
   const [step2Detail, setStep2Detail] = useState("");
   const [statusText, setStatusText] = useState("Initializing…");
+  const [lastUpdatedTick, setLastUpdatedTick] = useState(0);
   const [statusLive, setStatusLive] = useState(false);
   // Filters
   const [filters, setFilters] = useState<Filters>({ broker: "groww", excludeLiquidArb: true, excludeRegular: true });
@@ -124,7 +125,6 @@ export default function Dashboard() {
   // Overlay UI
   const [errMsg, setErrMsg] = useState<string | null>(null);
   const [warnMsg, setWarnMsg] = useState<string | null>(null);
-  const [footNote, setFootNote] = useState("");
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   // Derived for table/overlap (state so we can re-render on sort)
   const [tableRows, setTableRows] = useState<ReturnType<typeof buildTableRows>>([]);
@@ -139,6 +139,7 @@ export default function Dashboard() {
   const capCanvasRef = useRef<HTMLCanvasElement>(null);
   const sectorCanvasRef = useRef<HTMLCanvasElement>(null);
   const topHoldCanvasRef = useRef<HTMLCanvasElement>(null);
+  const stockExpCanvasRef = useRef<HTMLCanvasElement>(null);
   const charts = useRef<Record<string, Chart>>({});
 
   function destroyChart(id: string) {
@@ -148,41 +149,79 @@ export default function Dashboard() {
 
   // ── Auth ────────────────────────────────────────────────────────────────────
 
+  // Silent session check on mount — never opens a tab, never triggers OAuth
+  useEffect(() => {
+    setAuthState("checking");
+    fetch("/api/mcp/connect", { method: "GET" })
+      .then(r => r.json())
+      .then(data => {
+        if (data.status === "CONNECTED") setAuthState("connected");
+        else setAuthState("idle");
+      })
+      .catch(() => setAuthState("idle"));
+  }, []);
+
+  // Called only from a user click — opens tab synchronously so popup blocker is satisfied
   const connect = useCallback(async () => {
     setAuthState("checking");
     setAuthError(null);
+
+    // Open blank tab NOW (inside click handler = allowed by browser)
+    const popup = window.open("about:blank", "_blank");
+
     try {
       const res = await fetch("/api/mcp/connect", { method: "POST" });
       const data = await res.json();
+
       if (data.status === "CONNECTED") {
+        popup?.close();
         setAuthState("connected");
       } else if (data.status === "AUTH_REQUIRED") {
-        setAuthState("auth_pending");
-        window.open(data.authUrl, "_blank");
+        if (popup) {
+          popup.location.href = data.authUrl;
+          setAuthState("auth_pending");
+        } else {
+          // Popup was blocked — fallback message
+          setAuthError("Popup blocked. Please allow popups for this site and try again.");
+          setAuthState("error");
+        }
       } else {
+        popup?.close();
         setAuthError(data.message ?? "Connection failed");
         setAuthState("error");
       }
+    } catch (e) {
+      popup?.close();
+      setAuthError(e instanceof Error ? e.message : String(e));
+      setAuthState("error");
+    }
+  }, []);
+
+  // Called after storage event (no tab needed — auth is already done, just verify)
+  const verifyAfterAuth = useCallback(async () => {
+    setAuthState("checking");
+    try {
+      const res = await fetch("/api/mcp/connect", { method: "POST" });
+      const data = await res.json();
+      if (data.status === "CONNECTED") setAuthState("connected");
+      else { setAuthError("Session not found after login. Please try again."); setAuthState("error"); }
     } catch (e) {
       setAuthError(e instanceof Error ? e.message : String(e));
       setAuthState("error");
     }
   }, []);
 
-  // Listen for auth-done signal from popup tab
+  // Listen for auth-done signal from the login tab
   useEffect(() => {
     const handler = (e: StorageEvent) => {
       if (e.key !== "mcp_auth_done") return;
       localStorage.removeItem("mcp_auth_done");
-      if (e.newValue === "ok") connect();
+      if (e.newValue === "ok") verifyAfterAuth();
       else { setAuthError(`Auth failed: ${e.newValue}`); setAuthState("error"); }
     };
     window.addEventListener("storage", handler);
     return () => window.removeEventListener("storage", handler);
-  }, [connect]);
-
-  // Auto-check auth on mount
-  useEffect(() => { connect(); }, [connect]);
+  }, [verifyAfterAuth]);
 
   // ── Data loading ────────────────────────────────────────────────────────────
 
@@ -230,13 +269,8 @@ export default function Dashboard() {
 
       const now = new Date();
       setLastUpdated(now);
+      setLastUpdatedTick(Date.now());
       setStatusLive(true);
-      setStatusText(`Live · updated ${now.toLocaleTimeString()}`);
-      setFootNote(
-        `Data from INDmoney at ${now.toLocaleTimeString()} on ${now.toLocaleDateString()}. ` +
-        `Sector/overlap/top-holdings figures derive from each fund's disclosed top equity holdings, not full portfolio. ` +
-        `Overlap matched by internal instrument code, not name. Filters recompute instantly — press Refresh for fresh NAV.`
-      );
     } catch (e) {
       setStep1(s => s === "loading" ? "error" : s);
       setStep2(s => s === "loading" ? "error" : s);
@@ -275,7 +309,7 @@ export default function Dashboard() {
         maintainAspectRatio: false,
         plugins: {
           legend: { position: "right", labels: { color: "#E7EBF0", font: { size: 11.5 }, boxWidth: 11, padding: 10 } },
-          tooltip: { callbacks: { label: (c) => ` ${c.label}: ${Number(c.raw).toFixed(2)}%` } }
+          tooltip: { callbacks: { label: (c) => ` ${c.label}: ${Number(c.raw).toFixed(2)}% · ${inr(Number(c.raw) / 100 * totalCurrent)}` } }
         },
         cutout: "62%",
       },
@@ -315,7 +349,7 @@ export default function Dashboard() {
         maintainAspectRatio: false,
         plugins: {
           legend: { position: "right", labels: { color: "#E7EBF0", font: { size: 11.5 }, boxWidth: 11, padding: 10 } },
-          tooltip: { callbacks: { label: (c) => ` ${c.label}: ${Number(c.raw).toFixed(2)}%` } }
+          tooltip: { callbacks: { label: (c) => ` ${c.label}: ${Number(c.raw).toFixed(2)}% · ${inr(Number(c.raw) / 100 * totalCurrent)}` } }
         },
         cutout: "62%",
       },
@@ -372,7 +406,7 @@ export default function Dashboard() {
         },
         plugins: {
           legend: { labels: { color: "#E7EBF0", font: { size: 10.5 }, boxWidth: 10 } },
-          tooltip: { callbacks: { label: (c) => ` ${c.dataset.label}: ${c.raw}%` } },
+          tooltip: { callbacks: { label: (c) => ` ${c.dataset.label}: ${Number(c.raw).toFixed(2)}% · ${inr(Number(c.raw) / 100 * totalCurrent)}` } },
         },
       },
     });
@@ -437,9 +471,10 @@ export default function Dashboard() {
               label: (c) => {
                 const fund = c.label;
                 const pof = fund && c.dataset.label ? segMeta[fund]?.[c.dataset.label] : undefined;
+                const aumAbs = inr(Number(c.raw) / 100 * totalCurrent);
                 return pof != null
-                  ? ` ${c.dataset.label}: ${pof.toFixed(1)}% of fund (${c.raw}% of AUM)`
-                  : ` ${c.dataset.label}: ${c.raw}% of AUM`;
+                  ? ` ${c.dataset.label}: ${pof.toFixed(1)}% of fund · ${Number(c.raw).toFixed(2)}% of AUM (${aumAbs})`
+                  : ` ${c.dataset.label}: ${Number(c.raw).toFixed(2)}% of AUM (${aumAbs})`;
               },
               footer: (items) => {
                 const f = items[0]?.label;
@@ -453,8 +488,76 @@ export default function Dashboard() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fundMapLoaded, filtered.map(h => h.investment_code).join(","), fundMap]);
 
+  // Stock exposure chart (consolidated across all funds)
+  useEffect(() => {
+    if (!stockExpCanvasRef.current || !filtered.length || !fundMapLoaded) return;
+    const stockTotals: Record<string, { pct: number; val: number }> = {};
+    filtered.forEach(h => {
+      const fd = fundMap[h.investment_code];
+      if (!fd?.stocks?.length) return;
+      const fundWeight = totalCurrent ? h.market_value / totalCurrent : 0;
+      fd.stocks.forEach(s => {
+        const contrib = (s.pct / 100) * fundWeight * 100;
+        const contribVal = (s.pct / 100) * h.market_value;
+        if (!stockTotals[s.name]) stockTotals[s.name] = { pct: 0, val: 0 };
+        stockTotals[s.name].pct += contrib;
+        stockTotals[s.name].val += contribVal;
+      });
+    });
+    const sorted = Object.entries(stockTotals).sort((a, b) => b[1].pct - a[1].pct).slice(0, 18);
+    if (!sorted.length) return;
+    const labels = sorted.map(([name]) => name).reverse();
+    const values = sorted.map(([, v]) => +v.pct.toFixed(2)).reverse();
+    const absVals = sorted.map(([, v]) => v.val).reverse();
+
+    destroyChart("stockexp");
+    charts.current["stockexp"] = new Chart(stockExpCanvasRef.current!, {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [{
+          data: values,
+          backgroundColor: values.map((_, i) => i >= values.length - 3 ? "#5B9DF5" : "#5B9DF580"),
+          borderColor: "transparent",
+          borderRadius: 4,
+        }],
+      },
+      options: {
+        indexAxis: "y",
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: (c) => ` ${Number(c.raw).toFixed(2)}% of portfolio · ${inr(absVals[c.dataIndex])}`,
+            },
+          },
+        },
+        scales: {
+          x: { ticks: { color: "#7C8797", callback: (v) => v + "%" }, grid: { color: "#1B212B" } },
+          y: { ticks: { color: "#E7EBF0", font: { size: 11.5 } }, grid: { display: false } },
+        },
+      },
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fundMapLoaded, filtered.map(h => h.investment_code).join(","), fundMap]);
+
   // Cleanup charts on unmount
   useEffect(() => () => { Object.values(charts.current).forEach(c => c.destroy()); }, []);
+
+  // Live "ago" status text
+  useEffect(() => {
+    function agoText(date: Date): string {
+      const secs = Math.floor((Date.now() - date.getTime()) / 1000);
+      if (secs < 60) return "just now";
+      if (secs < 3600) return `${Math.floor(secs / 60)} min ago`;
+      return `${Math.floor(secs / 3600)} hr ago`;
+    }
+    if (!lastUpdated || !statusLive) return;
+    setStatusText(`Live · updated ${agoText(lastUpdated)}`);
+    const id = setInterval(() => setStatusText(`Live · updated ${agoText(lastUpdated)}`), 30_000);
+    return () => clearInterval(id);
+  }, [lastUpdated, lastUpdatedTick, statusLive]);
 
   // ── Overview, table, ticker, overlap (state-driven HTML) ───────────────────
 
@@ -606,17 +709,30 @@ export default function Dashboard() {
         <div className="connect-screen">
           <div className="connect-title">Portfolio Terminal</div>
           <div className="connect-sub">Mutual fund dashboard · powered by INDmoney</div>
-          {authState === "auth_pending" ? (
-            <p style={{ color: "var(--muted)", fontSize: 13 }}>Login tab opened — complete authentication there.</p>
-          ) : (
-            <button
-              className="btn-connect"
-              disabled={authState === "checking"}
-              onClick={connect}
-            >
-              {authState === "checking" ? "Connecting…" : "Connect to INDmoney"}
-            </button>
+
+          {authState === "checking" && (
+            <p style={{ color: "var(--muted)", fontSize: 13, fontFamily: "var(--mono)" }}>Checking session…</p>
           )}
+
+          {authState === "auth_pending" && (
+            <p style={{ color: "var(--muted)", fontSize: 13 }}>
+              Login tab opened — complete authentication there, this page will update automatically.
+            </p>
+          )}
+
+          {(authState === "idle" || authState === "error") && (
+            <>
+              <p style={{ color: "var(--muted)", fontSize: 13, maxWidth: 360, textAlign: "center" }}>
+                {authState === "idle"
+                  ? "No active session found. Click below to log in via INDmoney."
+                  : "Session expired or disconnected."}
+              </p>
+              <button className="btn-connect" onClick={connect}>
+                Connect to INDmoney
+              </button>
+            </>
+          )}
+
           {authError && <div className="connect-error">{authError}</div>}
         </div>
       </>
@@ -634,8 +750,18 @@ export default function Dashboard() {
         {/* Header */}
         <header>
           <div>
-            <div className="h-title">Portfolio Terminal</div>
-            <div className="h-sub">Mutual fund holdings · live via INDmoney{lastUpdated ? ` · ${lastUpdated.toLocaleDateString()}` : ""}</div>
+            <div className="h-title">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{marginRight:"9px",flexShrink:0}}>
+                <rect x="3" y="12" width="4" height="8" rx="1" fill="#5B9DF5"/>
+                <rect x="10" y="7" width="4" height="13" rx="1" fill="#34D399"/>
+                <rect x="17" y="3" width="4" height="17" rx="1" fill="#5B9DF5" opacity="0.6"/>
+                <path d="M4 11L11 6.5L18 3" stroke="#E8A33D" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+              Portfolio Terminal
+              <span className="h-title-sep">|</span>
+              <span className="h-title-desc">Your mutual fund dashboard</span>
+            </div>
+            <div className="h-sub">Powered by INDmoney MCP</div>
           </div>
           <div className="h-actions">
             <span>
@@ -661,7 +787,6 @@ export default function Dashboard() {
           <div className={`step${step2 !== "idle" ? " " + step2 : ""}`}>
             <span className="step-dot" />2. Fund details{step2Detail ? ` · ${step2Detail}` : ""}
           </div>
-          <span className="step-hint">step 2 needs fund IDs from step 1</span>
         </div>
 
         {/* Filter bar */}
@@ -779,6 +904,20 @@ export default function Dashboard() {
           </div>
         </div>
 
+        {/* Stock exposure chart */}
+        <div className="card">
+          <h2>Stock exposure — consolidated across funds</h2>
+          <div className="chart-box-stock">
+            {!fundMapLoaded && <div className="skeleton" style={{ position: "absolute", inset: 0, borderRadius: 6 }} />}
+            <canvas ref={stockExpCanvasRef} />
+          </div>
+          {fundMapLoaded && (
+            <div className="chart-note">
+              Each bar = stock&apos;s total <b>% of your portfolio</b> summed across all funds that hold it, weighted by fund allocation. Top 18 stocks shown. Based on disclosed top holdings only.
+            </div>
+          )}
+        </div>
+
         {/* Top holdings chart */}
         <div className="card">
           <h2>Top holdings per fund</h2>
@@ -803,8 +942,38 @@ export default function Dashboard() {
           )}
         </div>
 
-        {footNote && <div className="foot-note">{footNote}</div>}
       </div>
+
+      {/* Footer */}
+      <footer className="site-footer">
+        <div className="wrap footer-inner">
+          <div className="footer-brand">
+            <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="28" height="28" rx="7" fill="#1B2535"/>
+              <path d="M7 21V10l7-3 7 3v11" stroke="#5B9DF5" strokeWidth="1.6" strokeLinejoin="round"/>
+              <path d="M11 21v-6h6v6" stroke="#34D399" strokeWidth="1.6" strokeLinejoin="round"/>
+            </svg>
+            <div>
+              <div className="footer-brand-name">Portfolio Terminal</div>
+              <div className="footer-brand-sub">Powered by INDmoney MCP</div>
+            </div>
+          </div>
+          <div className="footer-divider" />
+          <div className="footer-notes">
+            {lastUpdated && (
+              <div className="footer-timestamp">
+                Data fetched {lastUpdated.toLocaleTimeString()} &middot;{" "}
+                {lastUpdated.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
+              </div>
+            )}
+            <ul className="footer-disclaimers">
+              <li>Sector, overlap &amp; top-holdings figures derive from each fund&apos;s disclosed top equity holdings — not the full portfolio.</li>
+              <li>Overlap is matched by internal instrument code, not fund name.</li>
+              <li>Filters recompute instantly — press Refresh for fresh NAV data.</li>
+            </ul>
+          </div>
+        </div>
+      </footer>
     </>
   );
 }

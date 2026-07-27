@@ -2,41 +2,33 @@ import { NextRequest, NextResponse } from "next/server";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildAuthProvider } from "../../../../lib/mcp-auth-provider";
-import { clearSession, getSession } from "../../../../lib/session-store";
+import { TokenStore, TOKEN_COOKIE } from "../../../../lib/token-store";
 
 const MCP_URL = new URL("https://mcp.indmoney.com/mcp");
 
-function makeResponse(body: object, sessionId: string, isNew: boolean) {
-  const res = NextResponse.json(body);
-  if (isNew) {
-    res.cookies.set("mcp_session", sessionId, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 7,
-    });
-  }
+async function withTokenCookie(res: NextResponse, store: TokenStore): Promise<NextResponse> {
+  if (!store.isDirty) return res;
+  const { value, options } = await store.toCookieOptions();
+  res.cookies.set(TOKEN_COOKIE, value, options as Parameters<typeof res.cookies.set>[2]);
   return res;
 }
 
+// Silent check — decrypts cookie only, never touches the MCP server
+export async function GET(req: NextRequest) {
+  const store = await TokenStore.fromCookie(req.cookies.get(TOKEN_COOKIE)?.value);
+  const d = store.get();
+  if (!d.accessToken) return NextResponse.json({ status: "NOT_CONNECTED" });
+  if (d.expiresAt && d.expiresAt < Date.now()) return NextResponse.json({ status: "NOT_CONNECTED", reason: "expired" });
+  return NextResponse.json({ status: "CONNECTED" });
+}
+
 export async function POST(req: NextRequest) {
-  const existingId = req.cookies.get("mcp_session")?.value;
-  const sessionId = existingId ?? crypto.randomUUID();
-  const isNew = !existingId;
+  const store = await TokenStore.fromCookie(req.cookies.get(TOKEN_COOKIE)?.value);
+  const d = store.get();
 
-  const session = getSession(sessionId);
-  const isExpired =
-    session.expiresAt && typeof session.expiresAt === "number"
-      ? session.expiresAt < Date.now()
-      : false;
+  if (d.expiresAt && d.expiresAt < Date.now()) store.clearTokens();
 
-  // Clear expired tokens so the SDK re-triggers auth
-  if (isExpired) {
-    clearSession(sessionId);
-  }
-
-  const authProvider = buildAuthProvider(sessionId);
+  const authProvider = buildAuthProvider(store, req);
   const transport = new StreamableHTTPClientTransport(MCP_URL, { authProvider });
   const client = new Client({ name: "portfolio-tracker", version: "0.1.0" }, { capabilities: {} });
 
@@ -45,24 +37,22 @@ export async function POST(req: NextRequest) {
     const { tools } = await client.listTools();
     await client.close();
 
-    return makeResponse({ status: "CONNECTED", tools }, sessionId, isNew);
+    return withTokenCookie(NextResponse.json({ status: "CONNECTED", tools }), store);
   } catch (err) {
     await client.close().catch(() => {});
 
     if (authProvider.capturedAuthUrl) {
-      return makeResponse(
-        { status: "AUTH_REQUIRED", authUrl: authProvider.capturedAuthUrl },
-        sessionId,
-        isNew
+      return withTokenCookie(
+        NextResponse.json({ status: "AUTH_REQUIRED", authUrl: authProvider.capturedAuthUrl }),
+        store
       );
     }
 
-    // Token was rejected by server → clear and force re-auth
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("401") || msg.includes("Unauthorized") || msg.includes("unauthorized")) {
-      clearSession(sessionId);
-      // Retry once — fresh session will trigger auth
-      const authProvider2 = buildAuthProvider(sessionId);
+      store.clearTokens();
+      // Retry once with cleared token
+      const authProvider2 = buildAuthProvider(store, req);
       const transport2 = new StreamableHTTPClientTransport(MCP_URL, { authProvider: authProvider2 });
       const client2 = new Client({ name: "portfolio-tracker", version: "0.1.0" }, { capabilities: {} });
       try {
@@ -72,10 +62,9 @@ export async function POST(req: NextRequest) {
         await client2.close().catch(() => {});
       }
       if (authProvider2.capturedAuthUrl) {
-        return makeResponse(
-          { status: "AUTH_REQUIRED", authUrl: authProvider2.capturedAuthUrl },
-          sessionId,
-          true
+        return withTokenCookie(
+          NextResponse.json({ status: "AUTH_REQUIRED", authUrl: authProvider2.capturedAuthUrl }),
+          store
         );
       }
     }
