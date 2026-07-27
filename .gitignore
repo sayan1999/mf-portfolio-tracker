@@ -1,0 +1,18 @@
+# Next.js
+.next/
+out/
+
+# Dependencies
+node_modules/
+
+# Environment — local secrets never committed
+.env.local
+.env*.local
+
+# Build artifacts
+*.tsbuildinfo
+.vercel
+
+# OS
+.DS_Store
+Thumbs.db
