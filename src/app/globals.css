@@ -233,6 +233,22 @@ canvas { max-width: 100%; }
 .btn-connect { background: var(--blue); color: #081018; border: none; padding: 12px 28px; border-radius: 9px; font-size: 15px; font-weight: 600; cursor: pointer; font-family: var(--sans); transition: opacity .15s; }
 .btn-connect:hover { opacity: .88; }
 .btn-connect:disabled { opacity: .5; cursor: default; }
+/* Fund name clickable */
+.fund-name-link { cursor: pointer; }
+.fund-name-link:hover { color: var(--blue); }
+.fn-chevron { font-size: 9px; color: var(--faint); margin-left: 5px; vertical-align: middle; }
+tr.row-selected td { background: var(--surface-2); }
+
+/* Fund holdings view toggle */
+.fh-view-seg { margin: 10px 0 14px; }
+.fh-view-seg button { padding: 4px 12px; font-size: 12px; }
+
+/* Asset split table */
+.fh-asset-parent td { padding-top: 10px; border-top: 1px solid var(--border-soft); }
+.fh-asset-parent:first-child td { border-top: none; padding-top: 8px; }
+.fh-asset-sub td { padding-top: 4px; padding-bottom: 4px; }
+.fh-sub-indent { padding-left: 20px !important; font-size: 12px; color: var(--muted); }
+
 .connect-error { color: var(--neg); font-size: 13px; font-family: var(--mono); }
 
 /* SIP Projection Calculator */
