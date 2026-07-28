@@ -90,9 +90,9 @@ Pure client-side calculator rendered at the bottom of the dashboard. No API call
 **Corpus formula**:
 - `sipCorpus(monthly, years, rate, stepUp)` — iterative step-up SIP: each year's monthly amount is `P × (1+stepUp/100)^year`, compounded monthly.
 - `growCorpus(currentValue, years, rate)` — simple annual compounding of the existing holding market value.
-- Total at year N = `growCorpus(existingValue, N, rate) + sipCorpus(monthly, N, rate, stepUp)`.
+- Two-phase formula: SIP runs for `investYears`, then coasts for `holdYears − investYears`. For a given column year `y`: `investY = min(y, sipInvestYears)`; corpus = `growCorpus(existing, y, rate) + growCorpus(sipCorpus(monthly, investY, rate, stepUp), y − investY, rate)`.
 
-**UI knobs**: Large / Mid / Small / Gold rate sliders (with historical con/opt reference bands), annual step-up slider (0–25%), custom horizon slider (1–40Y). Fixed columns: 5, 10, 15, 20, 30Y. Custom year highlighted in amber (✦).
+**UI knobs**: Large / Mid / Small / Gold rate sliders (with historical con/opt reference bands), annual step-up slider (0–25%), **"Invest for"** slider (SIP duration, 1–holdYears), **"Hold until ✦"** slider (total horizon, 1–40Y — auto-clamps invest slider if dragged below it). Fixed columns: 5, 10, 15, 20, 30Y. Custom hold year highlighted in amber (✦).
 
 ### Favicon (`src/app/icon.svg`)
 

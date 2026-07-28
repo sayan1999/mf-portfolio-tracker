@@ -20,11 +20,24 @@ interface Holding {
 
 interface StockHolding { name: string; code: string | null; sector: string; pct: number; nature?: string; fundMarketValueCr?: number }
 
+interface FundStat { type: string; title: string; stat_1y: number | null; stat_3y: number | null; stat_5y: number | null; stat_all: number | null; }
+interface PeriodReturns { return1m: number | null; return3m: number | null; return6m: number | null; return1y: number | null; return3y: number | null; return5y: number | null; return10y: number | null; return15y: number | null; }
+interface RiskMetrics { alpha: number | null; beta: number | null; sharpe_ratio: number | null; sortino_ratio: number | null; information_ratio: number | null; standard_deviation: number | null; expense_ratio: number | null; portfolio_turnover: number | null; aum: number | null; }
+interface SimilarFund { slug: string; name: string; }
 interface FundDetail {
   name: string; category: string;
   returns1Y: number | null; returns3Y: number | null;
   stocks: StockHolding[];
   marketCap: { name: string; value: number }[];
+  stats: FundStat[];
+  cagrReturns: PeriodReturns | null;
+  absoluteReturns: PeriodReturns | null;
+  riskMetrics: RiskMetrics | null;
+  slug: string | null;
+  growwCategory: string | null;
+  planType: string | null;
+  fundType: string | null;
+  subCategory: string | null;
 }
 
 type FundMap = Record<string, FundDetail>;
@@ -216,6 +229,8 @@ export default function Dashboard() {
   const [step2Detail, setStep2Detail] = useState("");
   const [step3, setStep3] = useState<"idle"|"loading"|"done"|"error">("idle");
   const [step3Detail, setStep3Detail] = useState("");
+  const [step4, setStep4] = useState<"idle"|"loading"|"done"|"error">("idle");
+  const [step4Detail, setStep4Detail] = useState("");
   const [statusText, setStatusText] = useState("Initializing…");
   const [lastUpdatedTick, setLastUpdatedTick] = useState(0);
   const [statusLive, setStatusLive] = useState(false);
@@ -238,10 +253,12 @@ export default function Dashboard() {
   const [capCaptionHtml, setCapCaptionHtml] = useState("");
   const [assetCaptionHtml, setAssetCaptionHtml] = useState("");
   const [fhView, setFhView] = useState<"stocks" | "assets">("stocks");
+  const [similarFundsMap, setSimilarFundsMap] = useState<Record<string, SimilarFund[]>>({});
   // SIP calculator
   const [capRates, setCapRates] = useState<Record<CapType | "gold", number>>({ large: 13, mid: 16, small: 18, gold: 9 });
   const [stepUp, setStepUp] = useState(5);
-  const [sipCustomYears, setSipCustomYears] = useState(10);
+  const [sipInvestYears, setSipInvestYears] = useState(10);
+  const [sipHoldYears, setSipHoldYears] = useState(20);
 
   // Canvas refs
   const assetCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -336,6 +353,7 @@ export default function Dashboard() {
 
   // ── Data loading ────────────────────────────────────────────────────────────
 
+
   const loadData = useCallback(async (force = false) => {
     setErrMsg(null);
     setWarnMsg(null);
@@ -347,6 +365,9 @@ export default function Dashboard() {
     setStep2Detail("");
     setStep3("idle");
     setStep3Detail("");
+    setStep4("idle");
+    setStep4Detail("");
+    setSimilarFundsMap({});
     setStatusLive(false);
     setStatusText("Fetching holdings…");
 
@@ -377,7 +398,7 @@ export default function Dashboard() {
 
       // Strip INDmoney stock holdings — Groww is the sole source for stocks
       const baseFundMap: FundMap = Object.fromEntries(
-        Object.entries(fdData.fundMap as FundMap).map(([id, fd]) => [id, { ...fd, stocks: [] }])
+        Object.entries(fdData.fundMap as FundMap).map(([id, fd]) => [id, { ...fd, stocks: [], stats: [], cagrReturns: null, absoluteReturns: null, riskMetrics: null, slug: null, growwCategory: null, planType: null, fundType: null, subCategory: null }])
       );
       setStep2("done");
       setStep2Detail(`${ids.length}/${ids.length}`);
@@ -394,18 +415,56 @@ export default function Dashboard() {
           body: JSON.stringify({ funds, force }),
         });
         if (gwRes.ok) {
-          const gwData = await gwRes.json() as { status: string; holdings: Record<string, { stocks: { name: string; slug: string; sector: string; pct: number; nature: string; fundMarketValueCr: number }[] }> };
+          const gwData = await gwRes.json() as { status: string; holdings: Record<string, { stocks: { name: string; slug: string; sector: string; pct: number; nature: string; fundMarketValueCr: number }[]; stats: FundStat[]; cagrReturns: PeriodReturns | null; absoluteReturns: PeriodReturns | null; riskMetrics: RiskMetrics | null; slug: string | null; meta: { subCategory: string | null; category: string | null; planType: string | null; fundType: string | null } }> };
           if (gwData.status === "OK") {
             const next = { ...baseFundMap };
             for (const [id, fd] of Object.entries(gwData.holdings)) {
               if (next[id]) {
-                next[id] = { ...next[id], stocks: fd.stocks.map(g => ({ name: g.name, code: g.slug, sector: g.sector, pct: g.pct, nature: g.nature, fundMarketValueCr: g.fundMarketValueCr })) };
+                next[id] = { ...next[id], stocks: fd.stocks.map(g => ({ name: g.name, code: g.slug, sector: g.sector, pct: g.pct, nature: g.nature, fundMarketValueCr: g.fundMarketValueCr })), stats: fd.stats ?? [], cagrReturns: fd.cagrReturns ?? null, absoluteReturns: fd.absoluteReturns ?? null, riskMetrics: fd.riskMetrics ?? null, slug: fd.slug ?? null, growwCategory: fd.meta?.category ?? null, planType: fd.meta?.planType ?? null, fundType: fd.meta?.fundType ?? null, subCategory: fd.meta?.subCategory ?? null };
               }
             }
             mergedFundMap = next;
             const matched = Object.values(gwData.holdings).filter(fd => fd.stocks.length > 0).length;
             setStep3("done");
             setStep3Detail(`${matched}/${funds.length} funds`);
+
+            // Single batched similar-funds fetch — group by Groww meta params
+            const groups = new Map<string, { category: string; subCategory: string; planType: string; fundType: string; ids: string[] }>();
+            for (const [id, fd] of Object.entries(gwData.holdings)) {
+              const cat = fd.meta?.category;
+              const sub = fd.meta?.subCategory;
+              if (!cat || !sub) continue;
+              const planType = fd.meta?.planType ?? "Direct";
+              const fundType = fd.meta?.fundType ?? "Growth";
+              const key = `${cat}:${sub}:${planType}:${fundType}`;
+              if (!groups.has(key)) groups.set(key, { category: cat, subCategory: sub, planType, fundType, ids: [] });
+              groups.get(key)!.ids.push(id);
+            }
+            if (groups.size > 0) {
+              setStep4("loading");
+              const queries = [...groups.values()].map(g => ({ category: g.category, subCategory: g.subCategory, planType: g.planType, fundType: g.fundType }));
+              fetch("/api/portfolio/similar-funds", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ queries }),
+              }).then(r => r.ok ? r.json() : null).then(data => {
+                if (data?.status !== "OK") { setStep4("error"); return; }
+                const resultMap = data.results as Record<string, SimilarFund[]>;
+                const simMap: Record<string, SimilarFund[]> = {};
+                for (const g of groups.values()) {
+                  const key = `${g.category}:${g.subCategory}:${g.planType}:${g.fundType}`;
+                  const simFunds = resultMap[key] ?? [];
+                  for (const id of g.ids) {
+                    const ownSlug = gwData.holdings[id]?.slug;
+                    simMap[id] = simFunds.filter(f => f.slug !== ownSlug);
+                  }
+                }
+                setSimilarFundsMap(simMap);
+                const filled = Object.values(simMap).filter(s => s.length > 0).length;
+                setStep4(filled > 0 ? "done" : "error");
+                setStep4Detail(`${filled}/${Object.keys(gwData.holdings).length} funds`);
+              }).catch(() => setStep4("error"));
+            }
           } else {
             setStep3("error");
           }
@@ -428,6 +487,7 @@ export default function Dashboard() {
       setStep1(s => s === "loading" ? "error" : s);
       setStep2(s => s === "loading" ? "error" : s);
       setStep3(s => s === "loading" ? "error" : s);
+      setStep4(s => s === "loading" ? "error" : s);
       setErrMsg((e instanceof Error ? e.message : String(e)));
       setStatusText("Error");
     }
@@ -859,6 +919,7 @@ export default function Dashboard() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filtered.map(h => h.investment_code + h.market_value).join(","), fundMap]);
 
+
   // ── Table ───────────────────────────────────────────────────────────────────
 
   const sortedRows = [...tableRows].sort((a, b) => {
@@ -875,9 +936,6 @@ export default function Dashboard() {
   const colDefs = [
     { k: "name",    label: "Fund",     num: false },
     { k: "cat",     label: "Category", num: false },
-    { k: "broker",  label: "Broker",   num: false },
-    { k: "r1y",     label: "1Y%",      num: true  },
-    { k: "r3y",     label: "3Y%",      num: true  },
     { k: "invested",label: "Invested", num: true  },
     { k: "current", label: "Current",  num: true  },
     { k: "pnl",     label: "P&L%",     num: true  },
@@ -957,7 +1015,7 @@ export default function Dashboard() {
               <span id="statusText" style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--mono)" }}>{statusText}</span>
             </span>
             <button className="refresh" onClick={() => loadData(true)} disabled={step1 === "loading" || step2 === "loading"}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className={step1 === "loading" || step2 === "loading" || step3 === "loading" ? "spin" : ""}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className={step1 === "loading" || step2 === "loading" || step3 === "loading" || step4 === "loading" ? "spin" : ""}>
                 <path d="M21 2v6h-6" /><path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
                 <path d="M3 22v-6h6" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
               </svg>
@@ -979,6 +1037,14 @@ export default function Dashboard() {
           <div className={`step${step3 !== "idle" ? " " + step3 : ""}`}>
             <span className="step-dot" />3. Full holdings{step3Detail ? ` · ${step3Detail}` : ""}
           </div>
+          {step4 !== "idle" && (
+            <>
+              <div className="step-arrow">→</div>
+              <div className={`step ${step4}`}>
+                <span className="step-dot" />4. Similar funds{step4Detail ? ` · ${step4Detail}` : ""}
+              </div>
+            </>
+          )}
         </div>
 
         {/* Filter bar */}
@@ -1029,7 +1095,7 @@ export default function Dashboard() {
           )}
         </div>
 
-        {/* Allocation charts */}
+        {/* Allocation charts — two donuts side by side */}
         <div className="grid-2">
           <div className="card">
             <h2>Allocation by asset class</h2>
@@ -1048,9 +1114,9 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Holdings table */}
+        {/* Portfolio Overview table — full width */}
         <div className="card">
-          <h2>Funds</h2>
+          <h2>Portfolio Overview</h2>
           {sortedRows.length === 0 ? (
             <><div className="skeleton sk-line" /><div className="skeleton sk-line" /><div className="skeleton sk-line" /></>
           ) : (
@@ -1065,43 +1131,22 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody>
-                {sortedRows.map(r => {
-                  const hasHoldings = !!fundMap[r.code]?.stocks?.length;
-                  return (
-                    <tr key={r.code} className={selectedFundCode === r.code ? "row-selected" : ""}>
-                      <td
-                        className={`fund-name${hasHoldings ? " fund-name-link" : ""}`}
-                        title={r.name}
-                        onClick={() => {
-                          if (!hasHoldings) return;
-                          setSelectedFundCode(c => c === r.code ? null : r.code);
-                          setTimeout(() => fundHoldingsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
-                        }}
-                      >
-                        {r.name}
-                        {hasHoldings && <span className="fn-chevron">{selectedFundCode === r.code ? "▲" : "▼"}</span>}
-                      </td>
-                      <td><span className="tag">{r.cat}</span></td>
-                      <td style={{ color: "var(--muted)", fontSize: 12 }}>{r.broker}</td>
-                      <td className={`num ${r.r1y === null ? "" : r.r1y >= 0 ? "pos" : "neg"}`}>
-                        {r.r1y === null ? "—" : `${r.r1y >= 0 ? "+" : ""}${r.r1y.toFixed(2)}%`}
-                      </td>
-                      <td className={`num ${r.r3y === null ? "" : r.r3y >= 0 ? "pos" : "neg"}`}>
-                        {r.r3y === null ? "—" : `${r.r3y >= 0 ? "+" : ""}${r.r3y.toFixed(2)}%`}
-                      </td>
-                      <td className="num">{inrFull(r.invested)}</td>
-                      <td className="num">{inrFull(r.current)}</td>
-                      <td className={`num ${r.pnl >= 0 ? "pos" : "neg"}`}>{r.pnl >= 0 ? "+" : ""}{r.pnl.toFixed(2)}%</td>
-                      <td className="num">{r.weight.toFixed(1)}%</td>
-                    </tr>
-                  );
-                })}
+                {sortedRows.map(r => (
+                  <tr key={r.code}>
+                    <td className="fund-name" title={r.name}>{r.name}</td>
+                    <td><span className="tag">{r.cat}</span></td>
+                    <td className="num">{inrFull(r.invested)}</td>
+                    <td className="num">{inrFull(r.current)}</td>
+                    <td className={`num ${r.pnl >= 0 ? "pos" : "neg"}`}>{r.pnl >= 0 ? "+" : ""}{r.pnl.toFixed(2)}%</td>
+                    <td className="num">{r.weight.toFixed(1)}%</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           )}
         </div>
 
-        {/* Fund holdings explorer — below the funds table */}
+        {/* Fund holdings explorer */}
         {fundMapLoaded && filtered.some(h => fundMap[h.investment_code]?.stocks?.length) && (
           <div className="card" ref={fundHoldingsRef}>
             <h2>Fund holdings</h2>
@@ -1116,96 +1161,232 @@ export default function Dashboard() {
                 </button>
               ))}
             </div>
-            {selectedFundCode && (
-              <div className="seg fh-view-seg">
-                <button className={fhView === "stocks" ? "active" : ""} onClick={() => setFhView("stocks")}>Stocks</button>
-                <button className={fhView === "assets" ? "active" : ""} onClick={() => setFhView("assets")}>Asset split</button>
-              </div>
-            )}
             {selectedFundCode && fundMap[selectedFundCode] && (() => {
               const fd = fundMap[selectedFundCode];
               const holding = filtered.find(h => h.investment_code === selectedFundCode);
               const mv = holding?.market_value ?? 0;
 
-              if (fhView === "assets") {
-                const total = fd.marketCap.reduce((s, r) => s + r.value, 0) || 100;
-                const isCapRow = (n: string) => { const l = n.toLowerCase(); return l.includes("large") || l.includes("mid") || l.includes("small") || l.includes("micro"); };
-                const capRows  = fd.marketCap.filter(r => isCapRow(r.name)).sort((a, b) => b.value - a.value);
-                const otherRows = fd.marketCap.filter(r => !isCapRow(r.name)).sort((a, b) => b.value - a.value);
-                const equityTotal = capRows.reduce((s, r) => s + r.value, 0);
-                const subCapColor = (n: string) => n.toLowerCase().includes("large") ? "#5B9DF5" : n.toLowerCase().includes("mid") ? "#34D399" : "#B98CE8";
-                return (
-                  <div className="fh-table-wrap">
-                    <table className="fh-table">
-                      <thead>
-                        <tr>
-                          <th>Asset class</th>
-                          <th className="fh-th-r">% of fund</th>
-                          <th className="fh-th-r">Est. value</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {capRows.length > 0 && (
-                          <>
-                            <tr className="fh-asset-parent">
-                              <td className="fh-td-name" style={{ color: "#5B9DF5", fontWeight: 600 }}>Equity</td>
-                              <td className="fh-td-r">{(equityTotal / total * 100).toFixed(1)}%</td>
-                              <td className="fh-td-r fh-val">{inr(equityTotal / total * mv)}</td>
+              const PERIODS: { key: keyof PeriodReturns; label: string }[] = [
+                { key: "return1m",  label: "1M"  },
+                { key: "return3m",  label: "3M"  },
+                { key: "return6m",  label: "6M"  },
+                { key: "return1y",  label: "1Y"  },
+                { key: "return3y",  label: "3Y"  },
+                { key: "return5y",  label: "5Y"  },
+                { key: "return10y", label: "10Y" },
+                { key: "return15y", label: "15Y" },
+              ];
+              const visiblePeriods = PERIODS.filter(p =>
+                fd.cagrReturns?.[p.key] != null || fd.absoluteReturns?.[p.key] != null
+              );
+
+              const fmtPct = (v: number | null | undefined, decimals = 2) =>
+                v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(decimals)}%`;
+              const pctClass = (v: number | null | undefined) =>
+                v == null ? "" : v >= 0 ? "pos" : "neg";
+
+              const compStats = fd.stats ?? [];
+              const fundReturn = compStats.find(s => s.type === "FUND_RETURN");
+              const catAvg     = compStats.find(s => s.type === "CATEGORY_AVG_RETURN");
+              const rankInCat  = compStats.find(s => s.type === "RANK_WITHIN_CATEGORY");
+
+              const similar = similarFundsMap[selectedFundCode] ?? [];
+              const viewUrl = fd.slug ? `https://groww.in/mutual-funds/${fd.slug}` : null;
+              const compareUrl = fd.slug && similar.length
+                ? `https://groww.in/mutual-funds/compare/${[fd.slug, ...similar.slice(0, 2).map(s => s.slug)].join("-vs-")}`
+                : null;
+
+              // Asset split data
+              const total = fd.marketCap.reduce((s, r) => s + r.value, 0) || 100;
+              const isCapRow = (n: string) => { const l = n.toLowerCase(); return l.includes("large") || l.includes("mid") || l.includes("small") || l.includes("micro"); };
+              const capRows   = fd.marketCap.filter(r => isCapRow(r.name)).sort((a, b) => b.value - a.value);
+              const otherRows = fd.marketCap.filter(r => !isCapRow(r.name)).sort((a, b) => b.value - a.value);
+              const equityTotal = capRows.reduce((s, r) => s + r.value, 0);
+              const subCapColor = (n: string) => n.toLowerCase().includes("large") ? "#5B9DF5" : n.toLowerCase().includes("mid") ? "#34D399" : "#B98CE8";
+              const stocks = [...fd.stocks].sort((a, b) => b.pct - a.pct);
+
+              return (
+                <div className="fh-stats-wrap">
+                  {/* View / Compare links */}
+                  {(viewUrl || compareUrl) && (
+                    <div className="fh-links-row">
+                      {viewUrl && <a href={viewUrl} target="_blank" rel="noopener noreferrer" className="fh-ext-link">View on Groww ↗</a>}
+                      {compareUrl && <a href={compareUrl} target="_blank" rel="noopener noreferrer" className="fh-ext-link">Compare with similar ↗</a>}
+                    </div>
+                  )}
+
+                  {/* Returns table + Category comparison side by side */}
+                  <div className="fh-returns-block">
+                    {visiblePeriods.length > 0 && (
+                      <div className="fh-table-wrap">
+                        <table className="fh-table">
+                          <thead>
+                            <tr>
+                              <th>Period</th>
+                              <th className="fh-th-r">CAGR</th>
+                              <th className="fh-th-r">Absolute</th>
                             </tr>
-                            {capRows.map(sub => (
-                              <tr key={sub.name} className="fh-asset-sub">
-                                <td className="fh-td-name fh-sub-indent" style={{ color: subCapColor(sub.name) }}>↳ {sub.name}</td>
-                                <td className="fh-td-r">{(sub.value / total * 100).toFixed(1)}%</td>
-                                <td className="fh-td-r fh-val">{inr(sub.value / total * mv)}</td>
+                          </thead>
+                          <tbody>
+                            {visiblePeriods.map(p => (
+                              <tr key={p.key}>
+                                <td className="fh-td-name" style={{ fontWeight: 500, color: "var(--muted)" }}>{p.label}</td>
+                                <td className={`fh-td-r ${pctClass(fd.cagrReturns?.[p.key])}`}>{fmtPct(fd.cagrReturns?.[p.key])}</td>
+                                <td className={`fh-td-r ${pctClass(fd.absoluteReturns?.[p.key])}`}>{fmtPct(fd.absoluteReturns?.[p.key])}</td>
                               </tr>
                             ))}
-                          </>
-                        )}
-                        {otherRows.map((row, i) => (
-                          <tr key={row.name} className="fh-asset-parent">
-                            <td className="fh-td-name" style={{ color: COLORS[i + 3], fontWeight: 600 }}>{row.name}</td>
-                            <td className="fh-td-r">{(row.value / total * 100).toFixed(1)}%</td>
-                            <td className="fh-td-r fh-val">{inr(row.value / total * mv)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {(fundReturn || catAvg || rankInCat) && (
+                      <div className="fh-table-wrap">
+                        <table className="fh-table">
+                          <thead>
+                            <tr>
+                              <th></th>
+                              <th className="fh-th-r">1Y</th>
+                              <th className="fh-th-r">3Y</th>
+                              <th className="fh-th-r">5Y</th>
+                              <th className="fh-th-r">All</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {fundReturn && (
+                              <tr>
+                                <td className="fh-td-name" style={{ fontWeight: 600 }}>{fundReturn.title}</td>
+                                <td className={`fh-td-r ${pctClass(fundReturn.stat_1y)}`}>{fmtPct(fundReturn.stat_1y)}</td>
+                                <td className={`fh-td-r ${pctClass(fundReturn.stat_3y)}`}>{fmtPct(fundReturn.stat_3y)}</td>
+                                <td className={`fh-td-r ${pctClass(fundReturn.stat_5y)}`}>{fmtPct(fundReturn.stat_5y)}</td>
+                                <td className={`fh-td-r ${pctClass(fundReturn.stat_all)}`}>{fmtPct(fundReturn.stat_all)}</td>
+                              </tr>
+                            )}
+                            {catAvg && (
+                              <tr>
+                                <td className="fh-td-name" style={{ color: "var(--muted)" }}>{catAvg.title}</td>
+                                <td className={`fh-td-r ${pctClass(catAvg.stat_1y)}`}>{fmtPct(catAvg.stat_1y)}</td>
+                                <td className={`fh-td-r ${pctClass(catAvg.stat_3y)}`}>{fmtPct(catAvg.stat_3y)}</td>
+                                <td className={`fh-td-r ${pctClass(catAvg.stat_5y)}`}>{fmtPct(catAvg.stat_5y)}</td>
+                                <td className={`fh-td-r ${pctClass(catAvg.stat_all)}`}>{fmtPct(catAvg.stat_all)}</td>
+                              </tr>
+                            )}
+                            {rankInCat && (
+                              <tr>
+                                <td className="fh-td-name" style={{ color: "var(--muted)" }}>{rankInCat.title}</td>
+                                <td className="fh-td-r" style={{ color: "var(--text)" }}>{rankInCat.stat_1y ?? "—"}</td>
+                                <td className="fh-td-r" style={{ color: "var(--text)" }}>{rankInCat.stat_3y ?? "—"}</td>
+                                <td className="fh-td-r" style={{ color: "var(--text)" }}>{rankInCat.stat_5y ?? "—"}</td>
+                                <td className="fh-td-r" style={{ color: "var(--text)" }}>{rankInCat.stat_all ?? "—"}</td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                   </div>
-                );
-              }
 
-              // Default: stocks view
-              const stocks = [...fd.stocks].sort((a, b) => b.pct - a.pct);
-              return (
-                <div className="fh-table-wrap">
-                  <table className="fh-table">
-                    <thead>
-                      <tr>
-                        <th className="fh-th-num">#</th>
-                        <th>Stock</th>
-                        <th>Sector</th>
-                        <th className="fh-th-r">% of fund</th>
-                        <th className="fh-th-r">Est. value</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {stocks.map((s, i) => {
-                        const isEquity = !s.nature || s.nature === "EQUITY";
-                        return (
-                          <tr key={i} className={isEquity ? "" : "fh-tr-nonequity"}>
-                            <td className="fh-td-num">{i + 1}</td>
-                            <td className="fh-td-name">
-                              {s.name}
-                              {!isEquity && <span className="fh-nature-badge">{s.nature}</span>}
-                            </td>
-                            <td className="fh-td-sector">{s.sector || "—"}</td>
-                            <td className="fh-td-r">{s.pct.toFixed(2)}%</td>
-                            <td className="fh-td-r fh-val">{inr(s.pct / 100 * mv)}</td>
+                  {/* Risk metrics chips */}
+                  {fd.riskMetrics && (() => {
+                    const rm = fd.riskMetrics!;
+                    const METRIC_DEFS: { key: keyof RiskMetrics; label: string; fmt: (v: number) => string; tip: string }[] = [
+                      { key: "aum",               label: "AUM",           fmt: v => `₹${v.toFixed(0)} Cr`,  tip: "Assets Under Management — total money managed by this fund" },
+                      { key: "alpha",             label: "Alpha",         fmt: v => v.toFixed(2),            tip: "Excess return over benchmark. Positive = fund manager added value." },
+                      { key: "beta",              label: "Beta",          fmt: v => v.toFixed(2),            tip: "Sensitivity to market moves. <1 = less volatile than index, >1 = more volatile." },
+                      { key: "sharpe_ratio",      label: "Sharpe",        fmt: v => v.toFixed(2),            tip: "Return per unit of total risk (higher is better)." },
+                      { key: "sortino_ratio",     label: "Sortino",       fmt: v => v.toFixed(2),            tip: "Return per unit of downside risk only (higher is better)." },
+                      { key: "information_ratio", label: "Info Ratio",    fmt: v => v.toFixed(2),            tip: "Consistency of outperforming the benchmark (higher = more consistent)." },
+                      { key: "standard_deviation",label: "Std Dev",       fmt: v => `${v.toFixed(2)}%`,      tip: "Annualised volatility of returns. Higher = more swings." },
+                      { key: "expense_ratio",     label: "Expense Ratio", fmt: v => `${v.toFixed(2)}%`,      tip: "Annual fee charged by the fund as a % of your investment." },
+                      { key: "portfolio_turnover",label: "Turnover",      fmt: v => `${v.toFixed(1)}%`,      tip: "How frequently the fund replaces its holdings in a year. Lower = buy-and-hold style." },
+                    ];
+                    const visible = METRIC_DEFS.filter(m => rm[m.key] != null);
+                    if (!visible.length) return null;
+                    return (
+                      <div className="fh-metrics-grid">
+                        {visible.map(m => (
+                          <div key={m.key} className="fh-metric-chip">
+                            <span className="fh-metric-label">
+                              {m.label}
+                              <span className="fh-info-icon" title={m.tip}>ⓘ</span>
+                            </span>
+                            <span className="fh-metric-value">{m.fmt(rm[m.key]!)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+
+                  {/* Stocks + Asset split side by side */}
+                  <div className="fh-holdings-split">
+                    <div className="fh-table-wrap">
+                      <table className="fh-table">
+                        <thead>
+                          <tr>
+                            <th className="fh-th-num">#</th>
+                            <th>Stock</th>
+                            <th>Sector</th>
+                            <th className="fh-th-r">% fund</th>
+                            <th className="fh-th-r">Est. value</th>
                           </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                        </thead>
+                        <tbody>
+                          {stocks.map((s, i) => {
+                            const isEquity = !s.nature || s.nature === "EQUITY";
+                            return (
+                              <tr key={i} className={isEquity ? "" : "fh-tr-nonequity"}>
+                                <td className="fh-td-num">{i + 1}</td>
+                                <td className="fh-td-name">
+                                  {s.name}
+                                  {!isEquity && <span className="fh-nature-badge">{s.nature}</span>}
+                                </td>
+                                <td className="fh-td-sector">{s.sector || "—"}</td>
+                                <td className="fh-td-r">{s.pct.toFixed(2)}%</td>
+                                <td className="fh-td-r fh-val">{inr(s.pct / 100 * mv)}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    {fd.marketCap.length > 0 && (
+                      <div className="fh-table-wrap">
+                        <table className="fh-table">
+                          <thead>
+                            <tr>
+                              <th>Asset class</th>
+                              <th className="fh-th-r">% fund</th>
+                              <th className="fh-th-r">Est. value</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {capRows.length > 0 && (
+                              <>
+                                <tr className="fh-asset-parent">
+                                  <td className="fh-td-name" style={{ color: "#5B9DF5", fontWeight: 600 }}>Equity</td>
+                                  <td className="fh-td-r">{(equityTotal / total * 100).toFixed(1)}%</td>
+                                  <td className="fh-td-r fh-val">{inr(equityTotal / total * mv)}</td>
+                                </tr>
+                                {capRows.map(sub => (
+                                  <tr key={sub.name} className="fh-asset-sub">
+                                    <td className="fh-td-name fh-sub-indent" style={{ color: subCapColor(sub.name) }}>↳ {sub.name}</td>
+                                    <td className="fh-td-r">{(sub.value / total * 100).toFixed(1)}%</td>
+                                    <td className="fh-td-r fh-val">{inr(sub.value / total * mv)}</td>
+                                  </tr>
+                                ))}
+                              </>
+                            )}
+                            {otherRows.map((row, i) => (
+                              <tr key={row.name} className="fh-asset-parent">
+                                <td className="fh-td-name" style={{ color: COLORS[i + 3], fontWeight: 600 }}>{row.name}</td>
+                                <td className="fh-td-r">{(row.value / total * 100).toFixed(1)}%</td>
+                                <td className="fh-td-r fh-val">{inr(row.value / total * mv)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
                 </div>
               );
             })()}
@@ -1281,8 +1462,12 @@ export default function Dashboard() {
           });
           const totalMonthly = SIP_FUNDS.reduce((s, f) => s + f.amount, 0);
           const totalExisting = sipMeta.reduce((s, m) => s + m.existingValue, 0);
-          const totalInvestedCust = SIP_FUNDS.reduce((s, f) => s + sipInvested(f.amount, sipCustomYears, stepUp), 0);
-          const totalCorpusCust = SIP_FUNDS.reduce((s, f, i) => s + growCorpus(sipMeta[i].existingValue, sipCustomYears, sipMeta[i].rate) + sipCorpus(f.amount, sipCustomYears, sipMeta[i].rate, stepUp), 0);
+          const totalInvestedCust = SIP_FUNDS.reduce((s, f) => s + sipInvested(f.amount, sipInvestYears, stepUp), 0);
+          const totalCorpusCust = SIP_FUNDS.reduce((s, f, i) => {
+            const { rate, existingValue } = sipMeta[i];
+            const sipEnd = sipCorpus(f.amount, sipInvestYears, rate, stepUp);
+            return s + growCorpus(existingValue, sipHoldYears, rate) + growCorpus(sipEnd, sipHoldYears - sipInvestYears, rate);
+          }, 0);
           return (
             <div className="card sip-calc">
               <div className="sip-header">
@@ -1332,7 +1517,7 @@ export default function Dashboard() {
                 })}
               </div>
 
-              {/* Step-up + custom horizon knobs */}
+              {/* Step-up + horizon knobs */}
               <div className="sip-knobs">
                 <div className="sip-knob">
                   <span className="sip-knob-label">Annual step-up</span>
@@ -1343,11 +1528,19 @@ export default function Dashboard() {
                   </div>
                 </div>
                 <div className="sip-knob">
-                  <span className="sip-knob-label">Custom horizon ✦</span>
+                  <span className="sip-knob-label">Invest for (SIP duration)</span>
                   <div className="sip-knob-row">
-                    <input type="range" min={1} max={40} step={1} value={sipCustomYears}
-                      onChange={e => setSipCustomYears(+e.target.value)} className="sip-slider" />
-                    <span className="sip-knob-val">{sipCustomYears}Y</span>
+                    <input type="range" min={1} max={sipHoldYears} step={1} value={sipInvestYears}
+                      onChange={e => setSipInvestYears(+e.target.value)} className="sip-slider" />
+                    <span className="sip-knob-val">{sipInvestYears}Y</span>
+                  </div>
+                </div>
+                <div className="sip-knob">
+                  <span className="sip-knob-label">Hold until ✦ (total horizon)</span>
+                  <div className="sip-knob-row">
+                    <input type="range" min={1} max={40} step={1} value={sipHoldYears}
+                      onChange={e => { const v = +e.target.value; setSipHoldYears(v); if (sipInvestYears > v) setSipInvestYears(v); }} className="sip-slider" />
+                    <span className="sip-knob-val">{sipHoldYears}Y</span>
                   </div>
                 </div>
               </div>
@@ -1362,14 +1555,17 @@ export default function Dashboard() {
                       <th className="sip-th-amt">Current</th>
                       <th className="sip-th-mix">Cap mix</th>
                       {FIXED_YEARS.map(y => <th key={y} className="sip-th-yr">{y}Y</th>)}
-                      <th className="sip-th-yr sip-th-cust">{sipCustomYears}Y ✦</th>
+                      <th className="sip-th-yr sip-th-cust">{sipHoldYears}Y ✦</th>
                     </tr>
                   </thead>
                   <tbody>
                     {SIP_FUNDS.map((sip, i) => {
                       const { rate, existingValue, fd } = sipMeta[i];
                       const capLabel = sip.cap === "flexi" ? "Flexi Cap" : sip.cap === "gold" ? "Gold" : SIP_RATE_META[sip.cap].label;
-                      const totalAtYear = (y: number) => growCorpus(existingValue, y, rate) + sipCorpus(sip.amount, y, rate, stepUp);
+                      const totalAtYear = (holdY: number) => {
+                        const investY = Math.min(holdY, sipInvestYears);
+                        return growCorpus(existingValue, holdY, rate) + growCorpus(sipCorpus(sip.amount, investY, rate, stepUp), holdY - investY, rate);
+                      };
                       return (
                         <tr key={sip.name} className="sip-tr">
                           <td className="sip-td-fund">{sip.name}</td>
@@ -1384,7 +1580,7 @@ export default function Dashboard() {
                           {FIXED_YEARS.map(y => (
                             <td key={y} className="sip-td-corpus">{inr(totalAtYear(y))}</td>
                           ))}
-                          <td className="sip-td-corpus sip-td-cust">{inr(totalAtYear(sipCustomYears))}</td>
+                          <td className="sip-td-corpus sip-td-cust">{inr(totalAtYear(sipHoldYears))}</td>
                         </tr>
                       );
                     })}
@@ -1397,7 +1593,11 @@ export default function Dashboard() {
                       <td className="sip-td-mix" />
                       {FIXED_YEARS.map(y => (
                         <td key={y} className="sip-td-corpus">
-                          {inr(SIP_FUNDS.reduce((s, f, i) => s + growCorpus(sipMeta[i].existingValue, y, sipMeta[i].rate) + sipCorpus(f.amount, y, sipMeta[i].rate, stepUp), 0))}
+                          {inr(SIP_FUNDS.reduce((s, f, i) => {
+                            const { rate, existingValue } = sipMeta[i];
+                            const investY = Math.min(y, sipInvestYears);
+                            return s + growCorpus(existingValue, y, rate) + growCorpus(sipCorpus(f.amount, investY, rate, stepUp), y - investY, rate);
+                          }, 0))}
                         </td>
                       ))}
                       <td className="sip-td-corpus sip-td-cust">{inr(totalCorpusCust)}</td>
@@ -1408,10 +1608,10 @@ export default function Dashboard() {
 
               {/* Summary line */}
               <div className="sip-summary">
-                At <b>{sipCustomYears}Y</b> with <b>{stepUp}% step-up</b> &mdash;{" "}
+                SIP for <b>{sipInvestYears}Y</b>{sipInvestYears < sipHoldYears ? <>, then grow for <b>{sipHoldYears - sipInvestYears}Y</b> more</> : null} · <b>{stepUp}% step-up</b> &mdash;{" "}
                 existing <b>{inr(totalExisting)}</b> + fresh SIPs <b>{inr(totalInvestedCust)}</b>{" "}
                 = total in <b>{inr(totalExisting + totalInvestedCust)}</b> &nbsp;→&nbsp;
-                corpus <b style={{ color: "var(--pos)" }}>{inr(totalCorpusCust)}</b>
+                corpus at {sipHoldYears}Y <b style={{ color: "var(--pos)" }}>{inr(totalCorpusCust)}</b>
                 <span className="sip-gain-x">&nbsp;({(totalCorpusCust / (totalExisting + totalInvestedCust)).toFixed(1)}×)</span>
               </div>
             </div>
